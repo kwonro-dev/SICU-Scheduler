@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SICU Schedule Manager™</title>
+    <meta name="description" content="Professional workforce scheduling and management tool">
+    <meta name="keywords" content="schedule, workforce, management, calendar, shifts">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1><i class="fas fa-users-cog"></i> SICU Schedule Manager™</h1>
+            <div class="navigation-tabs">
+                <button id="calendarTab" class="nav-tab active">
+                    <i class="fas fa-calendar-alt"></i> View Calendar
+                </button>
+                <button id="balanceTab" class="nav-tab">
+                    <i class="fas fa-balance-scale"></i> Balance Schedule
+                </button>
+                <button id="usersTab" class="nav-tab">
+                    <i class="fas fa-users"></i> Edit Users
+                </button>
+                <button id="shiftsTab" class="nav-tab">
+                    <i class="fas fa-clock"></i> Edit Shifts
+                </button>
+                <button id="rolesTab" class="nav-tab">
+                    <i class="fas fa-user-tag"></i> Edit Job Roles
+                </button>
+                <button id="importTab" class="nav-tab">
+                    <i class="fas fa-file-import"></i> Data Import
+                </button>
+            </div>
+        </header>
+
+        <!-- Calendar View - Separate from main content -->
+        <div id="calendarView" class="calendar-container">
+            <div class="calendar-header">
+                <div class="calendar-controls-row">
+                    <div class="calendar-selectors">
+                        <div class="filter-section">
+                            <label>Time Interval:</label>
+                            <div class="filter-toggles">
+                                <select id="timeInterval" class="filter-btn">
+                                    <option value="7">7 Days</option>
+                                    <option value="14">14 Days</option>
+                                    <option value="30">30 Days</option>
+                                    <option value="48" selected>48 Days</option>
+                                    <option value="90">90 Days</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="filter-section">
+                            <label>Start Date:</label>
+                            <div class="filter-toggles">
+                                <input type="date" id="calendarStartDate" class="filter-btn">
+                            </div>
+                        </div>
+                        <div class="filter-section">
+                            <label>Sort By:</label>
+                            <div class="filter-toggles">
+                                <select id="employeeSortOrder" class="filter-btn">
+                                    <option value="name-asc">Name (A-Z)</option>
+                                    <option value="name-desc">Name (Z-A)</option>
+                                    <option value="group-asc">Group (A, B, C, None)</option>
+                                    <option value="group-desc">Group (None, C, B, A)</option>
+                                    <option value="shift-asc">Shift Type (Day First)</option>
+                                    <option value="shift-desc">Shift Type (Night First)</option>
+                                    <option value="original">Original Order</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="calendar-filters">
+                        <div class="filter-section">
+                            <label>Shift Filters:</label>
+                            <div class="filter-toggles">
+                                <button id="filterAllShifts" class="filter-btn active" data-filter="all-shifts">
+                                    <i class="fas fa-clock"></i> All
+                                </button>
+                                <button id="filterDayShifts" class="filter-btn active" data-filter="day">
+                                    <i class="fas fa-sun"></i> Day
+                                </button>
+                                <button id="filterNightShifts" class="filter-btn active" data-filter="night">
+                                    <i class="fas fa-moon"></i> Night
+                                </button>
+                            </div>
+                        </div>
+                        <div class="filter-section">
+                            <label>Role Filters:</label>
+                            <div class="filter-toggles" id="roleFilters">
+                                <button id="filterAllRoles" class="filter-btn active" data-filter="all-roles">
+                                    <i class="fas fa-users"></i> All
+                                </button>
+                                <!-- Role filter buttons will be dynamically added here -->
+                                <button id="filterChargeShifts" class="filter-btn charge-filter-btn" data-filter="charge-shifts" title="This filter overrides all other filters">
+                                    <i class="fas fa-crown"></i> CN
+                                </button>
+                            </div>
+                        </div>
+                        <div class="filter-section">
+                            <label>Count Filters:</label>
+                            <div class="filter-toggles">
+                                <button id="toggleWeekendColumns" class="filter-btn active" data-column="weekend">
+                                    <i class="fas fa-calendar-weekend"></i> F/S/S
+                                </button>
+                                <button id="toggleVacationColumn" class="filter-btn active" data-column="vacation">
+                                    <i class="fas fa-umbrella-beach"></i> VAC
+                                </button>
+                                <button id="toggleRequiredColumn" class="filter-btn active" data-column="required">
+                                    <i class="fas fa-user-check"></i> REQ
+                                </button>
+                                <button id="toggleChargeColumn" class="filter-btn active" data-column="charge">
+                                    <i class="fas fa-crown"></i> CN
+                                </button>
+                                <button id="toggleMoveColumn" class="filter-btn active" data-column="move">
+                                    <i class="fas fa-exchange-alt"></i> MOV
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="calendar-actions">
+                        <button id="resetDataBtn" class="btn btn-danger btn-small">
+                            <i class="fas fa-trash"></i> Reset
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="schedule-matrix-container">
+                <div class="schedule-matrix" id="scheduleMatrix"></div>
+            </div>
+
+            <!-- Worker Count Summary -->
+            <div class="worker-count-summary-container">
+                <div class="worker-count-summary" id="workerCountSummary"></div>
+            </div>
+        </div>
+
+        <!-- Staffing Issues Floating Panel - Outside calendar container -->
+        <div id="staffingIssuesPanel" class="staffing-issues-panel">
+            <div class="panel-header">
+                <div class="panel-title">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span>Staffing Issues</span>
+                </div>
+                <div class="panel-controls">
+                    <button id="togglePanel" class="btn btn-icon">
+                        <i class="fas fa-chevron-up"></i>
+                    </button>
+                    <button id="closePanel" class="btn btn-icon">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="panel-content" id="panelContent">
+                <div class="issues-list" id="issuesList">
+                    <!-- Issues will be populated here -->
+                </div>
+                <div class="no-issues" id="noIssues">
+                    <i class="fas fa-check-circle"></i>
+                    <p>All shifts are properly staffed!</p>
+                </div>
+            </div>
+        </div>
+
+        <main class="main-content">
+            <!-- Balance Schedule View -->
+            <div id="balanceView" class="view">
+                <div class="balance-header">
+                    <h2>Schedule Balance Analysis</h2>
+                </div>
+                <div class="balance-content" id="balanceContent">
+                    <!-- Balance analysis will be populated here -->
+                </div>
+            </div>
+
+            <!-- Users Management View -->
+            <div id="usersView" class="view">
+                <div class="users-header">
+                    <h2>Employee Management</h2>
+                    <button id="addUserBtn" class="btn btn-primary">
+                        <i class="fas fa-plus"></i> Add Employee
+                    </button>
+                </div>
+                <div class="users-content" id="usersContent">
+                    <!-- Users list will be populated here -->
+                </div>
+            </div>
+
+            <!-- Shifts Management View -->
+            <div id="shiftsView" class="view">
+                <div class="shifts-header">
+                    <h2>Shift Types Management</h2>
+                    <button id="addShiftBtn" class="btn btn-primary">
+                        <i class="fas fa-plus"></i> Add Shift Type
+                    </button>
+                </div>
+                <div class="shifts-content" id="shiftsContent">
+                    <!-- Shifts list will be populated here -->
+                </div>
+            </div>
+
+            <!-- Job Roles Management View -->
+            <div id="rolesView" class="view">
+                <div class="roles-header">
+                    <h2>Job Roles Management</h2>
+                    <button id="addRoleBtn" class="btn btn-primary">
+                        <i class="fas fa-plus"></i> Add Job Role
+                    </button>
+                </div>
+                <div class="roles-content" id="rolesContent">
+                    <!-- Roles list will be populated here -->
+                </div>
+            </div>
+
+            <!-- Data Import View -->
+            <div id="importView" class="view">
+                <div class="import-header">
+                    <h2>Data Import/Export</h2>
+                </div>
+                <div class="import-content" id="importContent">
+
+                    <div class="import-section">
+                        <h3>Import XLSX Files</h3>
+                        <p>Import employee schedule assignments from Excel files (.xlsx) with full shift type and schedule support.</p>
+                        <div style="background: #e6fffa; padding: 10px; border-radius: 6px; margin-bottom: 15px; border-left: 4px solid #059669;">
+                            <small><strong>XLSX Format:</strong> Name, Job Type, Day 1, Day 2, Day 3, ... (last 3 columns ignored)<br>
+                            <strong>Sheets:</strong> Data should be in the first worksheet<br>
+                            <strong>Features:</strong> Full shift type creation, automatic color assignment, proper date parsing<br>
+                            <strong>Supported:</strong> .xlsx and .xls files</small>
+                        </div>
+                        <div class="file-upload">
+                            <i class="fas fa-file-excel"></i>
+                            <p>Click to select XLSX file</p>
+                            <small>Supports: .xlsx, .xls files</small>
+                            <input type="file" id="xlsxImportFile" accept=".xlsx,.xls">
+                        </div>
+                        <div id="xlsxProgress" style="display: none; margin-top: 20px;">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="xlsxProgressFill"></div>
+                            </div>
+                            <p id="xlsxProgressText">Processing...</p>
+                        </div>
+                    </div>
+
+                    <div class="import-section">
+                        <h3>Data Preview</h3>
+                        <div id="dataPreview" class="data-preview">
+                            <p>Upload an XLSX file to convert and review the data before importing.</p>
+                        </div>
+                    </div>
+
+                    <div class="import-section">
+                        <h3>Export Data</h3>
+                        <p>Export your data to various formats for backup or sharing.</p>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <button class="btn btn-primary" onclick="workforceManager.exportData('employees')">
+                                <i class="fas fa-download"></i> Export Employees
+                            </button>
+                            <button class="btn btn-primary" onclick="workforceManager.exportData('shifts')">
+                                <i class="fas fa-download"></i> Export Shifts
+                            </button>
+                            <button class="btn btn-primary" onclick="workforceManager.exportData('schedules')">
+                                <i class="fas fa-download"></i> Export Schedules
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Employee Modal -->
+    <div id="employeeModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="employeeModalTitle">Add New Employee</h3>
+                <button id="closeEmployeeModal" class="btn btn-icon"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <form id="employeeForm" class="employee-form">
+                <div class="form-group">
+                    <label for="employeeName">Full Name</label>
+                    <input type="text" id="employeeName" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label for="employeeRole">Job Role</label>
+                    <select id="employeeRole" name="roleId" required>
+                        <option value="">Select a role</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="employeeShiftType">Shift Type</label>
+                    <select id="employeeShiftType" name="shiftType">
+                        <option value="auto">Auto-determine (based on schedules)</option>
+                        <option value="Day">Day</option>
+                        <option value="Night">Night</option>
+                    </select>
+                    <small style="color: #666; display: block; margin-top: 4px;">
+                        Auto-determine will classify as Night if any shifts match "ANM N", "18*", or "Night*"
+                    </small>
+                </div>
+                    <div class="form-actions">
+                        <button type="button" id="cancelEmployee" class="btn btn-secondary">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save Employee</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Shift Type Modal -->
+    <div id="shiftModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="shiftModalTitle">Add New Shift Type</h3>
+                <button id="closeShiftModal" class="btn btn-icon"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <form id="shiftForm" class="shift-form">
+                <div class="form-group">
+                    <label for="shiftName">Shift Name</label>
+                    <input type="text" id="shiftName" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label for="shiftDescription">Description</label>
+                    <textarea id="shiftDescription" name="description" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="shiftColor">Color</label>
+                    <div class="color-picker">
+                        <input type="radio" id="shift-color-blue" name="color" value="#3b82f6" checked>
+                        <label for="shift-color-blue" class="color-option" style="background-color: #3b82f6;"></label>
+                        <input type="radio" id="shift-color-green" name="color" value="#10b981">
+                        <label for="shift-color-green" class="color-option" style="background-color: #10b981;"></label>
+                        <input type="radio" id="shift-color-red" name="color" value="#ef4444">
+                        <label for="shift-color-red" class="color-option" style="background-color: #ef4444;"></label>
+                        <input type="radio" id="shift-color-yellow" name="color" value="#f59e0b">
+                        <label for="shift-color-yellow" class="color-option" style="background-color: #f59e0b;"></label>
+                        <input type="radio" id="shift-color-purple" name="color" value="#8b5cf6">
+                        <label for="shift-color-purple" class="color-option" style="background-color: #8b5cf6;"></label>
+                        <input type="radio" id="shift-color-pink" name="color" value="#ec4899">
+                        <label for="shift-color-pink" class="color-option" style="background-color: #ec4899;"></label>
+                        <input type="radio" id="shift-color-teal" name="color" value="#14b8a6">
+                        <label for="shift-color-teal" class="color-option" style="background-color: #14b8a6;"></label>
+                        <input type="radio" id="shift-color-orange" name="color" value="#f97316">
+                        <label for="shift-color-orange" class="color-option" style="background-color: #f97316;"></label>
+                        <input type="radio" id="shift-color-indigo" name="color" value="#6366f1">
+                        <label for="shift-color-indigo" class="color-option" style="background-color: #6366f1;"></label>
+                        <input type="radio" id="shift-color-gray" name="color" value="#6b7280">
+                        <label for="shift-color-gray" class="color-option" style="background-color: #6b7280;"></label>
+                        <input type="radio" id="shift-color-cyan" name="color" value="#06b6d4">
+                        <label for="shift-color-cyan" class="color-option" style="background-color: #06b6d4;"></label>
+                        <input type="radio" id="shift-color-lime" name="color" value="#84cc16">
+                        <label for="shift-color-lime" class="color-option" style="background-color: #84cc16;"></label>
+                        <input type="radio" id="shift-color-rose" name="color" value="#f43f5e">
+                        <label for="shift-color-rose" class="color-option" style="background-color: #f43f5e;"></label>
+                        <input type="radio" id="shift-color-amber" name="color" value="#f59e0b">
+                        <label for="shift-color-amber" class="color-option" style="background-color: #f59e0b;"></label>
+                        <input type="radio" id="shift-color-violet" name="color" value="#8b5cf6">
+                        <label for="shift-color-violet" class="color-option" style="background-color: #8b5cf6;"></label>
+                        <input type="radio" id="shift-color-emerald" name="color" value="#10b981">
+                        <label for="shift-color-emerald" class="color-option" style="background-color: #10b981;"></label>
+                    </div>
+                </div>
+                    <div class="form-actions">
+                        <button type="button" id="cancelShift" class="btn btn-secondary">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save Shift Type</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Job Role Modal -->
+    <div id="roleModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="roleModalTitle">Add New Job Role</h3>
+                <button id="closeRoleModal" class="btn btn-icon"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <form id="roleForm" class="role-form">
+                <div class="form-group">
+                    <label for="roleName">Role Name</label>
+                    <input type="text" id="roleName" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label for="roleDescription">Description</label>
+                    <textarea id="roleDescription" name="description" rows="3"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="roleDepartment">Department</label>
+                    <input type="text" id="roleDepartment" name="department">
+                </div>
+                <div class="form-group">
+                    <label for="rolePayRate">Hourly Pay Rate</label>
+                    <input type="number" id="rolePayRate" name="payRate" step="0.01" min="0">
+                </div>
+                <div class="form-group">
+                    <label for="roleColor">Badge Color</label>
+                    <div class="color-picker">
+                        <input type="radio" id="role-color-blue" name="color" value="#3b82f6" checked>
+                        <label for="role-color-blue" class="color-option" style="background-color: #3b82f6;"></label>
+                        <input type="radio" id="role-color-green" name="color" value="#10b981">
+                        <label for="role-color-green" class="color-option" style="background-color: #10b981;"></label>
+                        <input type="radio" id="role-color-red" name="color" value="#ef4444">
+                        <label for="role-color-red" class="color-option" style="background-color: #ef4444;"></label>
+                        <input type="radio" id="role-color-yellow" name="color" value="#f59e0b">
+                        <label for="role-color-yellow" class="color-option" style="background-color: #f59e0b;"></label>
+                        <input type="radio" id="role-color-purple" name="color" value="#8b5cf6">
+                        <label for="role-color-purple" class="color-option" style="background-color: #8b5cf6;"></label>
+                        <input type="radio" id="role-color-pink" name="color" value="#ec4899">
+                        <label for="role-color-pink" class="color-option" style="background-color: #ec4899;"></label>
+                        <input type="radio" id="role-color-teal" name="color" value="#14b8a6">
+                        <label for="role-color-teal" class="color-option" style="background-color: #14b8a6;"></label>
+                        <input type="radio" id="role-color-orange" name="color" value="#f97316">
+                        <label for="role-color-orange" class="color-option" style="background-color: #f97316;"></label>
+                        <input type="radio" id="role-color-indigo" name="color" value="#6366f1">
+                        <label for="role-color-indigo" class="color-option" style="background-color: #6366f1;"></label>
+                        <input type="radio" id="role-color-gray" name="color" value="#6b7280">
+                        <label for="role-color-gray" class="color-option" style="background-color: #6b7280;"></label>
+                    </div>
+                </div>
+                    <div class="form-actions">
+                        <button type="button" id="cancelRole" class="btn btn-secondary">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save Job Role</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Schedule Assignment Modal -->
+    <div id="scheduleModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="scheduleModalTitle">Assign Shift</h3>
+                <button id="closeScheduleModal" class="btn btn-icon"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <form id="scheduleForm" class="schedule-form">
+                <div class="form-group">
+                    <label for="scheduleEmployee">Employee</label>
+                    <select id="scheduleEmployee" name="employeeId" required>
+                        <option value="">Select an employee</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="scheduleShift">Shift Type</label>
+                    <select id="scheduleShift" name="shiftId" required>
+                        <option value="">Select a shift</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="scheduleDate">Date</label>
+                    <input type="date" id="scheduleDate" name="date" required>
+                </div>
+                    <div class="form-actions">
+                        <button type="button" id="cancelSchedule" class="btn btn-secondary">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Assign Shift</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+
+    <script src="utils.js"></script>
+    <script src="dataProcessor.js"></script>
+    <script src="modalManager.js"></script>
+    <script src="filterManager.js"></script>
+    <script src="uiManager.js"></script>
+    <script src="importManager.js"></script>
+    <script src="EmployeeManager.js"></script>
+    <script src="calendarRenderer.js"></script>
+    <script src="viewRenderer.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
