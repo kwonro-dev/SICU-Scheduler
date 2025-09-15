@@ -65,13 +65,22 @@ class ImportManager {
             this.rawCsvData = csvData;
             this.xlsxFileName = file.name;
 
+            // Pre-clean to avoid duplicate work and ensure immediate processing has data
+            if (!this.cleanedCsvData) {
+                const fullCsvWithCleanedContent = this.cleanCsvNewlines(csvData);
+                const cleanedLines = fullCsvWithCleanedContent.trim().split('\n');
+                const dataLines = cleanedLines.slice(8);
+                const csvWithoutHeaders = dataLines.join('\n');
+                this.cleanedCsvData = DataProcessor.removeColumnsWithAllBlankData(csvWithoutHeaders);
+            }
+
             progressText.textContent = 'Conversion complete!';
             progressFill.style.width = '100%';
 
             // Show CSV preview
             setTimeout(() => {
-                progressDiv.style.display = 'none';
-                this.showCsvPreview(csvData, file.name);
+                // Skip preview: go straight to processing and success page
+                this.processCsvImport();
             }, 500);
 
         } catch (error) {

@@ -711,7 +711,7 @@ class WorkforceScheduleManager {
             if (toggleBtn) {
                 const icon = toggleBtn.querySelector('i');
                 if (icon) {
-                    icon.className = panel.classList.contains('collapsed') ? 'fas fa-chevron-down' : 'fas fa-chevron-up';
+                    icon.className = panel.classList.contains('collapsed') ? 'fas fa-chevron-up' : 'fas fa-chevron-down';
                 }
             }
         }

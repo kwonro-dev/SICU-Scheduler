@@ -316,29 +316,4 @@ class DataManager {
             }
         }
     }
-
-    // Export functions
-    exportData(type) {
-        let data, filename;
-
-        switch (type) {
-            case 'employees':
-                data = this.workforceManager.employees;
-                filename = 'employees.csv';
-                break;
-            case 'shifts':
-                data = this.workforceManager.shiftTypes;
-                filename = 'shifts.csv';
-                break;
-            case 'schedules':
-                data = this.workforceManager.schedules;
-                filename = 'schedules.csv';
-                break;
-        }
-
-        if (data && data.length > 0) {
-            const csv = DataProcessor.convertToCSV(data);
-            DataProcessor.downloadCSV(csv, filename);
-        }
-    }
 }

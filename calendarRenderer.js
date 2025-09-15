@@ -853,11 +853,10 @@ class CalendarRenderer {
                             data.totalUSDayMatches++;
                         }
 
-                        // Check RN employees working 6t* or Mid* shifts
+                        // Check RN employees working 6t* shifts only (Mid shifts now counted separately)
                         const isRN = roleName.toUpperCase().includes('RN') || roleName.toUpperCase().includes('REGISTERED NURSE') || roleName === 'RN';
-                        const isRNShift = (shiftName.startsWith('6t') || shiftName.toUpperCase().startsWith('6T') || shiftName.includes('6t') || shiftName.includes('6T')) ||
-                                         (shiftName.startsWith('Mid') || shiftName.toUpperCase().startsWith('MID') || shiftName.includes('Mid') || shiftName.includes('MID'));
-                        
+                        const isRNShift = shiftName.startsWith('6t') || shiftName.toUpperCase().startsWith('6T') || shiftName.includes('6t') || shiftName.includes('6T');
+
                         if (isRN && shiftName && isRNShift) {
                             data.rnDayCounts[dateIndex]++;
                             data.totalRNDayMatches++;
