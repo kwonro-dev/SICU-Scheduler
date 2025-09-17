@@ -234,9 +234,18 @@ class EmployeeManager {
         if (shiftId) {
             // Update or create schedule entry
             if (existingSchedule) {
+                console.log(`🔄 Updating existing schedule ${existingSchedule.id} from shift ${existingSchedule.shiftId} to ${shiftId}`);
+
                 // Update existing schedule
                 await this.workforceManager.updateSchedule(existingSchedule.id, { shiftId });
-                
+
+                // Force local data refresh to ensure UI consistency
+                const index = this.workforceManager.schedules.findIndex(s => s.id === existingSchedule.id);
+                if (index >= 0) {
+                    this.workforceManager.schedules[index] = { ...this.workforceManager.schedules[index], shiftId };
+                    console.log(`✅ Local data updated: schedule ${existingSchedule.id} now has shiftId ${shiftId}`);
+                }
+
                 // Log activity
                 await this.workforceManager.activityManager.ensureActivityLogger();
                 if (this.workforceManager.activityManager.activityLogger) {
@@ -244,7 +253,7 @@ class EmployeeManager {
                         'assign_shift',
                         'schedule',
                         existingSchedule.id,
-                        { 
+                        {
                             employeeName: employee?.name || 'Unknown',
                             shiftName: shiftType?.name || 'Unknown',
                             date: date
@@ -303,7 +312,26 @@ class EmployeeManager {
             await this.workforceManager.updateEmployee(employeeId, { shiftType: employee.shiftType });
         }
 
-        // Note: UI refresh is handled by Firebase listeners, no need to manually render
+        // Always force re-render for any schedule change to ensure UI consistency
+        setTimeout(() => {
+            console.log('🔄 Forcing re-render after schedule operation');
+            console.log('📊 Current schedules state:', this.workforceManager.schedules.filter(s =>
+                s.employeeId === employeeId && s.date === date
+            ));
+
+            // Cleanup existing event handlers before re-render
+            if (this.workforceManager.uiManager) {
+                this.workforceManager.uiManager.cleanupGlobalContextMenu();
+            }
+
+            this.workforceManager.calendarRenderer.renderScheduleMatrix();
+            // Ensure events are rebound after the re-render
+            setTimeout(() => {
+                if (this.workforceManager.uiManager) {
+                    this.workforceManager.uiManager.bindShiftCellEvents();
+                }
+            }, 50);
+        }, 50);
     }
 
 

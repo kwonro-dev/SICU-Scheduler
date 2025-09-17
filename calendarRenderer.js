@@ -4,8 +4,22 @@
 class CalendarRenderer {
     constructor(workforceManager) {
         this.workforceManager = workforceManager;
+        // Initialize lock state as instance variable
+        this.lockState = this.loadLockState();
         this.lastUpdateTime = 0;
         this.updateDebounceDelay = 100; // 100ms debounce
+        
+        // Cache for matrix HTML to avoid rebuilding
+        this.matrixHTMLCache = null;
+        this.lastMatrixState = null;
+        
+        // Cache for worker count summary
+        this.summaryHTMLCache = null;
+        this.lastSummaryState = null;
+        
+        // Cache for time interval to avoid repeated localStorage access
+        this.cachedTimeInterval = null;
+        this.todayDateString = null;
         
         // Bind issue filter events when calendar renderer is created
         setTimeout(() => {
@@ -66,7 +80,7 @@ class CalendarRenderer {
         });
         
         // Calculate total staff for each date (optimized - create scheduleMap once)
-        const timeInterval = parseInt(localStorage.getItem('timeInterval')) || 42;
+        const timeInterval = this.getCachedTimeInterval();
         const calendarStartDate = new Date(this.workforceManager.currentWeekStart.getFullYear(), this.workforceManager.currentWeekStart.getMonth(), this.workforceManager.currentWeekStart.getDate());
         
         // Create scheduleMap once for all dates
@@ -135,7 +149,7 @@ class CalendarRenderer {
     analyzeStaffingIssuesBasic() {
         
         const issues = [];
-        const timeInterval = parseInt(localStorage.getItem('timeInterval')) || 42;
+        const timeInterval = this.getCachedTimeInterval();
         const calendarStartDate = new Date(this.workforceManager.currentWeekStart.getFullYear(), this.workforceManager.currentWeekStart.getMonth(), this.workforceManager.currentWeekStart.getDate());
 
         // Create a schedule lookup map for quick access
@@ -304,7 +318,7 @@ class CalendarRenderer {
                     }
                     
                     // Handle basic staffing issues (fallback)
-                    const shiftName = this.workforceManager.shiftTypes.find(s => s.id === issueDetail.shift)?.name || issueDetail.shift;
+                    const shiftName = shiftTypeMap.get(issueDetail.shift)?.name || issueDetail.shift;
                     const issueType = issueDetail.type === 'under-staffed' ? 'Under-staffed' : 'Over-staffed';
                     const icon = issueDetail.type === 'under-staffed' ? 'fas fa-user-minus' : 'fas fa-user-plus';
 
@@ -429,6 +443,49 @@ class CalendarRenderer {
     }
 
     /**
+     * Get cached time interval to avoid repeated localStorage access
+     */
+    getCachedTimeInterval() {
+        if (this.cachedTimeInterval === null) {
+            this.cachedTimeInterval = parseInt(localStorage.getItem('timeInterval')) || 42;
+        }
+        return this.cachedTimeInterval;
+    }
+
+    /**
+     * Get cached today's date string to avoid repeated Date object creation
+     */
+    getCachedTodayDateString() {
+        if (!this.todayDateString) {
+            this.todayDateString = new Date().toDateString();
+        }
+        return this.todayDateString;
+    }
+
+    /**
+     * Check if we can use cached matrix HTML
+     */
+    canUseCachedMatrix() {
+        if (!this.matrixHTMLCache || !this.lastMatrixState) {
+            return false;
+        }
+
+        const currentState = JSON.stringify({
+            employees: this.workforceManager.employees.length,
+            schedules: this.workforceManager.schedules.length,
+            currentWeekStart: this.workforceManager.currentWeekStart?.toISOString(),
+            timeInterval: parseInt(localStorage.getItem('timeInterval')) || 42,
+            filterState: this.workforceManager.filterManager ? {
+                shiftFilters: this.workforceManager.filterManager.shiftFilters,
+                roleFilters: this.workforceManager.filterManager.roleFilters,
+                sortOrder: this.workforceManager.filterManager.sortOrder
+            } : null
+        });
+
+        return currentState === this.lastMatrixState;
+    }
+
+    /**
      * Render the schedule matrix (calendar view)
      * Creates a grid showing employees as rows and dates as columns
      * Includes shift assignments, role badges, and count summaries
@@ -437,21 +494,30 @@ class CalendarRenderer {
         const renderStartTime = performance.now();
         const matrixContainer = document.getElementById('scheduleMatrix');
 
-        console.log('🎨 CalendarRenderer.renderScheduleMatrix called', {
-            user: this.workforceManager.authManager?.user?.email,
-            isAdmin: this.workforceManager.authManager?.adminEmails?.has(this.workforceManager.authManager?.user?.email?.toLowerCase()),
-            employeesCount: this.workforceManager.employees.length,
-            schedulesCount: this.workforceManager.schedules.length,
-            matrixContainerExists: !!matrixContainer
-        });
+        // Performance logging only in development
+        if (window.location.hostname === 'localhost') {
+            console.log('🎨 CalendarRenderer.renderScheduleMatrix called', {
+                employeesCount: this.workforceManager.employees.length,
+                schedulesCount: this.workforceManager.schedules.length
+            });
+        }
 
         if (!matrixContainer) {
             console.error('Schedule matrix element not found');
             return;
         }
 
-        // Get time interval from localStorage or use 48 as default
-        const timeInterval = parseInt(localStorage.getItem('timeInterval')) || 42;
+        // Check if we can use cached matrix HTML
+        if (this.canUseCachedMatrix()) {
+            matrixContainer.innerHTML = this.matrixHTMLCache;
+            // Still need to update summary and other elements
+            const todayDateString = this.getCachedTodayDateString();
+            this.renderWorkerCountSummaryWithData(this.currentWeekDates, this.workerCountData, todayDateString);
+            return;
+        }
+
+        // Get time interval from localStorage or use 48 as default (cached)
+        const timeInterval = this.getCachedTimeInterval();
 
         // Use the configured start date (from localStorage or default)
         // Create a new date object to avoid reference issues
@@ -459,6 +525,8 @@ class CalendarRenderer {
 
         // Generate dates starting from the selected start date (same as sample data)
         const weekDates = [];
+        const todayDateString = this.getCachedTodayDateString();
+        
         for (let i = 0; i < timeInterval; i++) {
             const date = new Date(calendarStartDate);
             date.setDate(calendarStartDate.getDate() + i);
@@ -470,6 +538,18 @@ class CalendarRenderer {
         this.workforceManager.schedules.forEach(schedule => {
             const key = `${schedule.employeeId}_${schedule.date}`;
             scheduleMap.set(key, schedule);
+        });
+
+        // Create shift type lookup map for performance optimization
+        const shiftTypeMap = new Map();
+        this.workforceManager.shiftTypes.forEach(shiftType => {
+            shiftTypeMap.set(shiftType.id, shiftType);
+        });
+
+        // Create role lookup map for performance optimization
+        const roleMap = new Map();
+        this.workforceManager.jobRoles.forEach(role => {
+            roleMap.set(role.id, role);
         });
 
         // Load snapshot once for all employees (major performance optimization)
@@ -492,13 +572,13 @@ class CalendarRenderer {
         // If no snapshot exists but we have schedules, create one for change tracking
         if (!snapshot && this.workforceManager.schedules.length > 0 && this.workforceManager.snapshotManager) {
             try {
-                // Create snapshot synchronously for immediate use
+                // Create snapshot synchronously for immediate use (optimized - avoid deep cloning)
                 const newSnapshot = {
                     createdAt: new Date().toISOString(),
-                    employees: JSON.parse(JSON.stringify(this.workforceManager.employees || [])),
-                    shiftTypes: JSON.parse(JSON.stringify(this.workforceManager.shiftTypes || [])),
-                    jobRoles: JSON.parse(JSON.stringify(this.workforceManager.jobRoles || [])),
-                    schedules: JSON.parse(JSON.stringify(this.workforceManager.schedules || [])),
+                    employees: this.workforceManager.employees || [],
+                    shiftTypes: this.workforceManager.shiftTypes || [],
+                    jobRoles: this.workforceManager.jobRoles || [],
+                    schedules: this.workforceManager.schedules || [],
                     currentWeekStart: this.workforceManager.currentWeekStart ? 
                         this.workforceManager.currentWeekStart.toISOString().split('T')[0] : null
                 };
@@ -509,7 +589,8 @@ class CalendarRenderer {
             }
         }
 
-        if (!snapshot) {
+        // Snapshot warning only in development
+        if (!snapshot && window.location.hostname === 'localhost') {
             console.warn('⚠️ No snapshot available for change tracking');
         }
 
@@ -549,12 +630,13 @@ class CalendarRenderer {
             <div class="matrix-cell header-cell" style="background: #f8fafc !important; border-bottom: 2px solid #e2e8f0 !important;">Employee Name</div>
             <div class="matrix-cell header-cell" style="background: #f8fafc !important; border-bottom: 2px solid #e2e8f0 !important;">Job Type</div>
             ${weekDates.map((date, index) => {
-                const isToday = date.toDateString() === new Date().toDateString();
-                const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-                const isSaturday = date.getDay() === 6;
-                const headerStyle = '';
-                return `<div class="matrix-cell header-cell date-header ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}" style="${headerStyle}">
-                    ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                const isToday = date.toDateString() === todayDateString;
+                const dayOfWeek = date.getDay();
+                const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+                const isSaturday = dayOfWeek === 6;
+                const dateString = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                return `<div class="matrix-cell header-cell date-header ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}">
+                    ${dateString}
                 </div>`;
             }).join('')}
             <div class="matrix-cell header-cell count-header count-header-fri" style="background: #f0fdf4 !important; border-bottom: 2px solid #22c55e !important;">Fri</div>
@@ -567,15 +649,18 @@ class CalendarRenderer {
         `;
 
         // Add employee rows (each employee gets their own row with all date columns)
-        // Filter employees based on current filter settings, then sort them
-        const filteredEmployees = this.workforceManager.filterManager.getSortedEmployees(
-            this.workforceManager.employees.filter(employee => this.workforceManager.filterManager.shouldShowEmployee(employee))
-        );
+        // Use cached filtered employees for better performance
+        const filteredEmployees = this.workforceManager.filterManager.getCachedFilteredEmployees();
+        
+        // Debug: Log the first 5 employees being rendered
+        if (window.location.hostname === 'localhost') {
+            console.log('🎨 Calendar rendering employees (first 5):', filteredEmployees.slice(0, 5).map(e => e.name));
+        }
 
         const employeeLoopStart = performance.now();
         
         filteredEmployees.forEach((employee, empIndex) => {
-            const role = this.workforceManager.jobRoles.find(r => r.id === employee.roleId);
+            const role = roleMap.get(employee.roleId);
             const roleName = role ? role.name : 'No Role';
             const shiftType = employee.shiftType || this.workforceManager.employeeManager.determineEmployeeShiftType(employee);
             const shiftBadgeClass = shiftType === 'Night' ? 'night-shift-badge' : 'day-shift-badge';
@@ -598,7 +683,7 @@ class CalendarRenderer {
                 const schedule = scheduleMap.get(scheduleKey);
 
                 if (schedule) {
-                    const shiftType = this.workforceManager.shiftTypes.find(s => s.id === schedule.shiftId);
+                    const shiftType = shiftTypeMap.get(schedule.shiftId);
                     const shiftName = shiftType ? shiftType.name : schedule.shiftType || '';
 
                     // Count shifts for Friday, Saturday, Sunday that do NOT contain "R" or "C "
@@ -657,7 +742,7 @@ class CalendarRenderer {
                 const schedule = scheduleMap.get(scheduleKey);
                 
 
-                const isToday = date.toDateString() === new Date().toDateString();
+                const isToday = date.toDateString() === todayDateString;
                 const isWeekend = date.getDay() === 0 || date.getDay() === 6;
                 const isSaturday = date.getDay() === 6;
 
@@ -665,7 +750,7 @@ class CalendarRenderer {
                 let shiftColor = '#f3f4f6';
 
                 if (schedule) {
-                    const shiftType = this.workforceManager.shiftTypes.find(s => s.id === schedule.shiftId);
+                    const shiftType = shiftTypeMap.get(schedule.shiftId);
                     if (shiftType) {
                         shiftName = shiftType.name;
                         shiftColor = shiftType.color || '#3b82f6';
@@ -686,15 +771,20 @@ class CalendarRenderer {
                 const differenceType = shiftDifferences.get(dateString);
                 const differenceClass = differenceType ? `shift-${differenceType}` : '';
                 
-                // Build the class list
-                const classList = `matrix-cell shift-cell ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''} ${isOffShift ? 'off-shift' : ''} ${differenceClass}`.trim();
-                
-                // Always use inline background color to preserve shift colors
-                const inlineStyle = `style="background-color: ${shiftColor};"`;
-                
-                matrixHTML += `<div id="${shiftCellId}" class="${classList}" ${inlineStyle} data-employee-id="${employee.id}" data-date="${dateString}" data-shift-id="${schedule ? schedule.shiftId : ''}">
-                    ${shiftName}
-                </div>`;
+        // Build the class list (optimized for performance)
+        const classes = ['matrix-cell', 'shift-cell'];
+        if (isToday) classes.push('today');
+        if (isWeekend) classes.push('weekend');
+        if (isSaturday) classes.push('saturday');
+        if (isOffShift) classes.push('off-shift');
+        if (differenceClass) classes.push(differenceClass);
+        
+        const classList = classes.join(' ');
+        
+        // Use CSS custom properties for better performance than inline styles
+        matrixHTML += `<div id="${shiftCellId}" class="${classList}" style="--shift-color:${shiftColor};background-color:var(--shift-color);" data-employee-id="${employee.id}" data-date="${dateString}" data-shift-id="${schedule ? schedule.shiftId : ''}">
+            ${shiftName}
+        </div>`;
 
             });
 
@@ -720,6 +810,20 @@ class CalendarRenderer {
 
         matrixContainer.innerHTML = matrixHTML;
 
+        // Cache the matrix HTML for future use
+        this.matrixHTMLCache = matrixHTML;
+        this.lastMatrixState = JSON.stringify({
+            employees: this.workforceManager.employees.length,
+            schedules: this.workforceManager.schedules.length,
+            currentWeekStart: this.workforceManager.currentWeekStart?.toISOString(),
+            timeInterval: timeInterval,
+            filterState: this.workforceManager.filterManager ? {
+                shiftFilters: this.workforceManager.filterManager.shiftFilters,
+                roleFilters: this.workforceManager.filterManager.roleFilters,
+                sortOrder: this.workforceManager.filterManager.sortOrder
+            } : null
+        });
+
         // Update CSS grid template to match the actual number of columns
         const baseColumns = 2; // Employee name + Job type
         const dateColumns = timeInterval; // Date columns
@@ -738,7 +842,7 @@ class CalendarRenderer {
         matrixContainer.style.minWidth = '100%'; // Ensure at least container width
 
         // Render the worker count summary below the calendar (use pre-calculated data)
-        this.renderWorkerCountSummaryWithData(weekDates, workerCountData);
+        this.renderWorkerCountSummaryWithData(weekDates, workerCountData, todayDateString);
 
         // Note: Drag scroll functionality is bound once during initialization, no need to rebind after every render
 
@@ -750,8 +854,13 @@ class CalendarRenderer {
             this.workforceManager.filterManager.updateColumnVisibility();
         }, 50);
 
-        // Bind right-click events to shift cells for editing
-        this.workforceManager.uiManager.bindShiftCellEvents();
+        // Bind right-click events to shift cells for editing (with delay to ensure DOM is ready)
+        setTimeout(() => {
+            // Cleanup any existing global context menu handlers first
+            this.workforceManager.uiManager.cleanupGlobalContextMenu();
+            // Then bind new events
+            this.workforceManager.uiManager.bindShiftCellEvents();
+        }, 50);
         
     }
 
@@ -946,11 +1055,16 @@ class CalendarRenderer {
     }
 
     // Render worker count summary using pre-calculated data (ultra-fast)
-    renderWorkerCountSummaryWithData(weekDates, data) {
+    renderWorkerCountSummaryWithData(weekDates, data, todayDateString = null) {
         const summaryContainer = document.getElementById('workerCountSummary');
         if (!summaryContainer) {
             console.error('❌ Worker count summary container not found');
             return;
+        }
+
+        // Use provided todayDateString or get cached one
+        if (!todayDateString) {
+            todayDateString = this.getCachedTodayDateString();
         }
 
         // Helper function to generate count cells with Saturday borders
@@ -965,6 +1079,12 @@ class CalendarRenderer {
         // Generate summary HTML using pre-calculated data - PROPER GRID ROWS
         let summaryHTML = '';
 
+        // Create role name lookup map for performance
+        const roleNameMap = new Map();
+        this.workforceManager.jobRoles.forEach(role => {
+            roleNameMap.set(role.name.toUpperCase(), role);
+        });
+
         // Check which role types should be shown based on current filters
         const shouldShowRole = (roleName) => {
             // Check if "all-roles" is active
@@ -973,7 +1093,7 @@ class CalendarRenderer {
             }
             
             // Check if specific role is active
-            const role = this.workforceManager.jobRoles.find(r => r.name.toUpperCase() === roleName.toUpperCase());
+            const role = roleNameMap.get(roleName.toUpperCase());
             if (role && this.workforceManager.filterManager.roleFilters[role.id]) {
                 return true;
             }
@@ -985,12 +1105,20 @@ class CalendarRenderer {
         if (this.workforceManager.filterManager.shiftFilters['day']) {
             
             // DAY section header
-            summaryHTML += `<div class="summary-cell summary-label" style="grid-column: 1 / -1; text-align: center; font-weight: 700; font-size: 1rem; margin-top: 2rem;">DAY Shift</div>`;
+            summaryHTML += `<div class="summary-cell summary-label" style="grid-column: 1 / -1; text-align: left; font-weight: 700; font-size: 1rem; margin-top: 2rem; padding-left: 1rem; position: relative;">
+                <button class="shift-lock-btn" data-shift-type="day" title="Lock/Unlock Day Shift Editing">
+                    <i class="fas fa-lock-open"></i>
+                </button>
+                <button class="shift-verify-btn" data-shift-type="day" title="Verify Day Shift Data">
+                    ✓
+                </button>
+                <span style="margin-left: 7rem;">DAY Shift</span>
+            </div>`;
             
             // Date header row - complete row
             summaryHTML += `<div class="summary-cell summary-label">Date</div>`;
             weekDates.forEach(date => {
-                const isToday = date.toDateString() === new Date().toDateString();
+                const isToday = date.toDateString() === todayDateString;
                 const isWeekend = date.getDay() === 0 || date.getDay() === 6;
                 const isSaturday = date.getDay() === 6;
                 summaryHTML += `<div class="summary-cell date-cell ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>`;
@@ -1047,12 +1175,20 @@ class CalendarRenderer {
         if (this.workforceManager.filterManager.shiftFilters['night']) {
             
             // NIGHT section header
-            summaryHTML += `<div class="summary-cell summary-label" style="grid-column: 1 / -1; text-align: center; font-weight: 700; font-size: 1rem; margin-top: 2rem;">NIGHT Shift</div>`;
+            summaryHTML += `<div class="summary-cell summary-label" style="grid-column: 1 / -1; text-align: left; font-weight: 700; font-size: 1rem; margin-top: 2rem; padding-left: 1rem; position: relative;">
+                <button class="shift-lock-btn" data-shift-type="night" title="Lock/Unlock Night Shift Editing">
+                    <i class="fas fa-lock-open"></i>
+                </button>
+                <button class="shift-verify-btn" data-shift-type="night" title="Verify Night Shift Data">
+                    ✓
+                </button>
+                <span style="margin-left: 7rem;">NIGHT Shift</span>
+            </div>`;
             
             // Date header row - complete row
             summaryHTML += `<div class="summary-cell summary-label">Date</div>`;
             weekDates.forEach(date => {
-                const isToday = date.toDateString() === new Date().toDateString();
+                const isToday = date.toDateString() === todayDateString;
                 const isWeekend = date.getDay() === 0 || date.getDay() === 6;
                 const isSaturday = date.getDay() === 6;
                 summaryHTML += `<div class="summary-cell date-cell ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>`;
@@ -1101,8 +1237,28 @@ class CalendarRenderer {
 
         summaryContainer.innerHTML = summaryHTML;
         
+        // Bind lock and verify button events
+        this.bindShiftButtons();
+        
+        // Update lock button states with a small delay to ensure DOM is ready
+        setTimeout(() => {
+            // Only reload lock state if it's not already loaded
+            if (!this.lockState) {
+                this.lockState = this.loadLockState();
+            }
+            console.log('Loading lock state on render:', this.lockState);
+            this.updateShiftLockButtonsWithState(this.lockState);
+            
+            // Debug: Check if verify buttons exist
+            const verifyBtns = document.querySelectorAll('.shift-verify-btn');
+            console.log(`🔍 DEBUG: Found ${verifyBtns.length} verify buttons in DOM after render`);
+            verifyBtns.forEach((btn, i) => {
+                console.log(`🔍 DEBUG: Verify button ${i}:`, btn, 'data-shift-type:', btn.dataset.shiftType);
+            });
+        }, 50); // Reduced delay for faster response
+        
         // Set up CSS grid template to match the calendar exactly
-        const timeInterval = parseInt(localStorage.getItem('timeInterval')) || 42;
+        const timeInterval = this.getCachedTimeInterval();
         let gridTemplate = `250px repeat(${timeInterval}, 50px)`; // Label column + date columns
         gridTemplate += ' 40px 40px 40px 40px 40px 40px 40px'; // Fri, Sat, Sun, Vac, Req, CHA, MOV columns
         summaryContainer.style.gridTemplateColumns = gridTemplate;
@@ -1207,6 +1363,734 @@ class CalendarRenderer {
             // Remove filtering class to show all shifts
             matrixContainer.classList.remove('filtering-mode');
         }
+    }
+
+    /**
+     * Load lock state from localStorage
+     */
+    loadLockState() {
+        try {
+            const stored = localStorage.getItem('shiftLockState');
+            return stored ? JSON.parse(stored) : { day: false, night: false };
+        } catch (e) {
+            console.warn('Error loading lock state:', e);
+            return { day: false, night: false };
+        }
+    }
+
+    /**
+     * Save lock state to localStorage and update instance variable
+     */
+    saveLockState(lockState) {
+        this.lockState = { ...lockState };
+        try {
+            localStorage.setItem('shiftLockState', JSON.stringify(lockState));
+            console.log('Saved lock state:', lockState);
+        } catch (e) {
+            console.warn('Error saving lock state:', e);
+        }
+    }
+
+    /**
+     * Bind events to shift lock and verify buttons
+     */
+    bindShiftButtons() {
+        const lockButtons = document.querySelectorAll('.shift-lock-btn');
+        console.log(`Binding events to ${lockButtons.length} lock buttons`);
+        
+        lockButtons.forEach((button, index) => {
+            console.log(`Button ${index}:`, button);
+            console.log(`Button dataset:`, button.dataset);
+            
+            // Remove any existing event listeners by cloning
+            const newButton = button.cloneNode(true);
+            button.parentNode.replaceChild(newButton, button);
+            
+            console.log(`Binding click event to button ${index} for ${newButton.dataset.shiftType}`);
+            
+            // Use mousedown to avoid conflicts with global click handlers
+            newButton.addEventListener('mousedown', (e) => {
+                console.log(`MOUSEDOWN EVENT on button ${newButton.dataset.shiftType}`);
+                // Only respond to left mouse button
+                if (e.button === 0) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    console.log(`Processing lock toggle for ${newButton.dataset.shiftType}`);
+                    this.toggleShiftLock(newButton.dataset.shiftType);
+                }
+            });
+        });
+
+        // Use event delegation for verify buttons (more reliable)
+        console.log(`🔍 VERIFICATION: Setting up event delegation for verify buttons`);
+        
+        // Remove any existing delegated listeners
+        document.removeEventListener('mousedown', this.verifyButtonMousedownHandler);
+        
+        // Track processing to prevent double triggers
+        this.verificationInProgress = this.verificationInProgress || new Set();
+        
+        // Use mousedown instead of click since click isn't firing
+        this.verifyButtonMousedownHandler = (e) => {
+            if (e.target.classList.contains('shift-verify-btn')) {
+                // Only respond to left mouse button
+                if (e.button === 0) {
+                    const shiftType = e.target.dataset.shiftType;
+                    
+                    // Prevent double processing
+                    if (this.verificationInProgress.has(shiftType)) {
+                        console.log(`🔍 VERIFY: Already processing ${shiftType}, ignoring`);
+                        return;
+                    }
+                    
+                    console.log(`🔍 VERIFY MOUSEDOWN (delegated) for ${shiftType} - PROCESSING`);
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // Mark as processing
+                    this.verificationInProgress.add(shiftType);
+                    
+                    // Process and clear flag when done
+                    this.initiateShiftVerification(shiftType).finally(() => {
+                        this.verificationInProgress.delete(shiftType);
+                    });
+                } else {
+                    console.log(`🔍 VERIFY MOUSEDOWN (delegated) for ${e.target.dataset.shiftType} - IGNORED (button ${e.button})`);
+                }
+            }
+        };
+        
+        document.addEventListener('mousedown', this.verifyButtonMousedownHandler);
+    }
+
+    /**
+     * Toggle lock state for a specific shift type
+     */
+    toggleShiftLock(shiftType) {
+        console.log(`Toggling lock for ${shiftType} shift`);
+        
+        // Use instance variable for current state
+        console.log('Current lock state:', this.lockState);
+        
+        // Toggle the specific shift type
+        this.lockState[shiftType] = !this.lockState[shiftType];
+        
+        console.log('New lock state:', this.lockState);
+        
+        // Save the updated state
+        this.saveLockState(this.lockState);
+        
+        // Also save through data manager for cloud sync
+        this.workforceManager.dataManager.saveData('shiftLockState', this.lockState);
+        
+        // Update button appearance with the current state
+        this.updateShiftLockButtonsWithState(this.lockState);
+        
+        // Log the lock/unlock activity
+        this.logLockActivity(shiftType, this.lockState[shiftType]);
+        
+        console.log(`${shiftType} shift editing ${this.lockState[shiftType] ? 'locked' : 'unlocked'}`);
+    }
+
+    /**
+     * Update lock button appearance based on current state
+     */
+    updateShiftLockButtons() {
+        const lockState = this.workforceManager.dataManager.loadData('shiftLockState') || {
+            day: false,
+            night: false
+        };
+        
+        this.updateShiftLockButtonsWithState(lockState);
+    }
+
+    /**
+     * Update lock button appearance with provided state
+     */
+    updateShiftLockButtonsWithState(lockState) {
+        console.log('Updating lock buttons with state:', lockState);
+        
+        const lockButtons = document.querySelectorAll('.shift-lock-btn');
+        console.log(`Found ${lockButtons.length} lock buttons`);
+        
+        if (lockButtons.length === 0) {
+            console.warn('No lock buttons found! Summary may have been re-rendered.');
+            return;
+        }
+        
+        lockButtons.forEach(button => {
+            const shiftType = button.dataset.shiftType;
+            const isLocked = lockState[shiftType];
+            
+            console.log(`Updating button for ${shiftType}, locked: ${isLocked}`);
+            
+            const icon = button.querySelector('i');
+            console.log(`Before update - icon class: ${icon.className}`);
+            
+            if (isLocked) {
+                button.classList.add('locked');
+                // Replace the entire icon element
+                icon.outerHTML = '<i class="fas fa-lock"></i>';
+                button.title = `Unlock ${shiftType.charAt(0).toUpperCase() + shiftType.slice(1)} Shift Editing`;
+                console.log(`Set ${shiftType} button to locked state`);
+            } else {
+                button.classList.remove('locked');
+                // Replace the entire icon element
+                icon.outerHTML = '<i class="fas fa-lock-open"></i>';
+                button.title = `Lock ${shiftType.charAt(0).toUpperCase() + shiftType.slice(1)} Shift Editing`;
+                console.log(`Set ${shiftType} button to unlocked state`);
+            }
+        });
+    }
+
+    /**
+     * Check if editing is locked for a specific shift type
+     */
+    isShiftEditingLocked(shiftType) {
+        // Ensure we have current lock state
+        if (!this.lockState) {
+            this.lockState = this.loadLockState();
+        }
+        
+        console.log(`Checking lock state for ${shiftType}:`, this.lockState);
+        return this.lockState[shiftType] || false;
+    }
+
+    /**
+     * Log shift lock/unlock activity
+     */
+    async logLockActivity(shiftType, isLocked) {
+        try {
+            // Ensure activity logger is available
+            await this.workforceManager.activityManager.ensureActivityLogger();
+            if (this.workforceManager.activityManager.activityLogger) {
+                const action = isLocked ? 'lock_shift' : 'unlock_shift';
+                const description = `${shiftType.charAt(0).toUpperCase() + shiftType.slice(1)} shift editing ${isLocked ? 'locked' : 'unlocked'}`;
+                
+                await this.workforceManager.activityManager.activityLogger.logActivity(
+                    `${action}_${shiftType}`,
+                    'system',
+                    `shift_lock_${shiftType}_${Date.now()}`,
+                    {
+                        shiftType: shiftType.toUpperCase(),
+                        action: isLocked ? 'LOCKED' : 'UNLOCKED',
+                        description: `${shiftType.toUpperCase()} shift editing ${isLocked ? 'LOCKED' : 'UNLOCKED'}`,
+                        timestamp: new Date().toISOString()
+                    }
+                );
+                
+                console.log(`📝 Logged ${action} activity for ${shiftType} shift`);
+            }
+        } catch (error) {
+            console.error('❌ Error logging lock activity:', error);
+        }
+    }
+
+    /**
+     * Initiate shift verification process
+     */
+    async initiateShiftVerification(shiftType) {
+        console.log(`🔍 VERIFICATION: Starting verification for ${shiftType} shift`);
+        
+        // Create file input element
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = '.xlsx,.xls';
+        fileInput.style.display = 'none';
+        
+        fileInput.addEventListener('change', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const file = e.target.files[0];
+            
+            // Immediately disable and hide the input
+            fileInput.disabled = true;
+            fileInput.style.display = 'none';
+            
+            if (file) {
+                console.log(`File selected for ${shiftType} verification:`, file.name);
+                
+                // Process the file
+                try {
+                    await this.processVerificationFile(file, shiftType);
+                } finally {
+                    // Clean up after processing
+                    if (fileInput.parentNode) {
+                        document.body.removeChild(fileInput);
+                    }
+                }
+            } else {
+                // Clean up if no file selected
+                if (fileInput.parentNode) {
+                    document.body.removeChild(fileInput);
+                }
+            }
+        });
+        
+        // Prevent default behavior on the input itself
+        fileInput.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+        
+        // Add to DOM and trigger click
+        document.body.appendChild(fileInput);
+        fileInput.click();
+    }
+
+    /**
+     * Process uploaded file for verification
+     */
+    async processVerificationFile(file, shiftType) {
+        try {
+            console.log(`Processing verification file for ${shiftType} shift`);
+            
+            // Show loading indicator
+            const loadingMessage = this.showLoadingMessage(`Verifying ${shiftType} shift data...`);
+            
+            // Use the same Excel parsing logic as import manager
+            const workbook = await this.parseExcelFile(file);
+            const verificationData = this.extractVerificationData(workbook, shiftType);
+            
+            // Compare with current calendar data
+            const comparisonResult = this.compareShiftData(verificationData, shiftType);
+            
+            // Hide loading and show results
+            this.hideLoadingMessage(loadingMessage);
+            this.showVerificationResults(comparisonResult, shiftType);
+            
+        } catch (error) {
+            console.error('❌ Error processing verification file:', error);
+            this.hideLoadingMessage();
+            await showAlert(`Error processing file: ${error.message}`, 'Verification Error');
+        }
+    }
+
+    /**
+     * Parse Excel file using SheetJS
+     */
+    async parseExcelFile(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    resolve(workbook);
+                } catch (error) {
+                    reject(error);
+                }
+            };
+            reader.onerror = () => reject(new Error('Failed to read file'));
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    /**
+     * Extract verification data using EXACT import manager workflow
+     */
+    extractVerificationData(workbook, shiftType) {
+        console.log(`🔍 VERIFICATION: Extracting data for ${shiftType} shift`);
+        
+        // Convert workbook to CSV format (same as import manager)
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const csvText = XLSX.utils.sheet_to_csv(worksheet);
+        
+        // EXACT COPY of import manager workflow:
+        // 1. Clean content within quotes
+        const fullCsvWithCleanedContent = this.cleanCsvNewlines(csvText);
+        
+        // 2. Split cleaned data and save 8th row as metadata
+        const cleanedLines = fullCsvWithCleanedContent.trim().split('\n');
+        let rawMetadataRow = cleanedLines[7] || '';
+        
+        // 3. Process the 8th row metadata (same as import manager)
+        const xlsxMetadataRow = this.processMetadataRow(rawMetadataRow);
+        console.log('🔍 VERIFICATION: Processed metadata row:', xlsxMetadataRow);
+        
+        // 4. Remove first 8 header rows from cleaned data
+        const dataLines = cleanedLines.slice(8);
+        const csvWithoutHeaders = dataLines.join('\n');
+        
+        // 5. Remove columns that have all blank data
+        const fullyCleanedCsv = DataProcessor.removeColumnsWithAllBlankData(csvWithoutHeaders);
+        
+        // 6. Parse the filtered CSV data using XLSX-specific parsing
+        const data = DataProcessor.parseXlsxCsv(fullyCleanedCsv);
+        console.log(`🔍 VERIFICATION: Final parsed data: ${data.length} rows`);
+        console.log('🔍 VERIFICATION: First 5 rows:', data.slice(0, 5));
+        
+        // 7. Process using the EXACT same function as import manager
+        const processedData = DataProcessor.processXlsxScheduleData(
+            data, 
+            generateId, 
+            this.workforceManager.currentWeekStart, 
+            xlsxMetadataRow, 
+            DataProcessor.parseCsvRow
+        );
+        
+        console.log(`🔍 VERIFICATION: Processed ${processedData.schedules.length} schedules`);
+        
+        // 8. Filter for shift type and convert to verification format
+        const verificationSchedules = processedData.schedules.map(schedule => {
+            const employee = processedData.employees.find(emp => emp.id === schedule.employeeId);
+            return {
+                employeeName: employee?.name || 'Unknown',
+                date: schedule.date,
+                shiftName: schedule.shiftType
+            };
+        });
+        
+        // Filter for specific shift type
+        const filteredSchedules = this.filterSchedulesByShiftType(verificationSchedules, shiftType);
+        console.log(`🔍 VERIFICATION: Filtered ${filteredSchedules.length} schedules for ${shiftType} shift`);
+        
+        return filteredSchedules;
+    }
+
+    /**
+     * Process metadata row (same as import manager)
+     */
+    processMetadataRow(rawMetadataRow) {
+        const cells = DataProcessor.parseCsvRow(rawMetadataRow);
+        const filtered = cells.filter(cell => cell && cell.trim() !== '');
+        const result = ['', ''].concat(filtered);
+        return result.join(',');
+    }
+
+    /**
+     * Parse date from Excel header using the same logic as import manager
+     */
+    parseDateFromHeader(dateHeader) {
+        // Use the exact same logic as DataProcessor.parseDayColumn
+        return DataProcessor.parseDayColumn(dateHeader, this.workforceManager.currentWeekStart);
+    }
+
+    /**
+     * Clean CSV data by removing newlines, carriage returns, and spaces within quotes
+     * Same logic as import manager
+     */
+    cleanCsvNewlines(csvText) {
+        let result = '';
+        let inQuotes = false;
+        let i = 0;
+        
+        while (i < csvText.length) {
+            const char = csvText[i];
+            const nextChar = csvText[i + 1];
+            
+            if (char === '"') {
+                if (inQuotes && nextChar === '"') {
+                    // Handle escaped quotes ("")
+                    result += '""';
+                    i += 2;
+                    continue;
+                } else {
+                    // Toggle quote state
+                    inQuotes = !inQuotes;
+                    result += char;
+                }
+            } else if ((char === '\n' || char === '\r' || char === ' ') && inQuotes) {
+                // Skip newlines, carriage returns, and spaces within quotes
+                // Don't add anything to result - completely remove them
+            } else {
+                result += char;
+            }
+            i++;
+        }
+        
+        return result;
+    }
+
+    /**
+     * Check if a value looks like a job role (helper for name reconstruction)
+     */
+    isJobRole(value) {
+        if (!value) return false;
+        
+        // Check against known job roles in the system
+        const knownRoles = this.workforceManager.jobRoles.map(role => role.name.toLowerCase());
+        const lowerValue = value.toLowerCase();
+        
+        // Direct match
+        if (knownRoles.includes(lowerValue)) {
+            return true;
+        }
+        
+        // Common job role patterns
+        const jobRolePatterns = [
+            /^(rn|lpn|cna|pct|us|amgr|mgr|cn|charge)$/i,
+            /nurse/i,
+            /manager/i,
+            /assistant/i,
+            /tech/i,
+            /aide/i
+        ];
+        
+        return jobRolePatterns.some(pattern => pattern.test(value));
+    }
+
+    /**
+     * Filter schedules by shift type based on employee classification
+     */
+    filterSchedulesByShiftType(schedules, shiftType) {
+        console.log(`🔍 VERIFICATION: Filtering ${schedules.length} schedules for ${shiftType} shift type`);
+        
+        const filtered = schedules.filter(schedule => {
+            // Find the employee for this schedule
+            const employee = this.workforceManager.employees.find(emp => emp.name === schedule.employeeName);
+            if (!employee) {
+                return false;
+            }
+            
+            // Check if employee belongs to the specified shift type
+            const employeeShiftType = this.workforceManager.employeeManager.determineEmployeeShiftType(employee);
+            return employeeShiftType.toLowerCase() === shiftType.toLowerCase();
+        });
+        
+        console.log(`🔍 VERIFICATION: Filtered result: ${filtered.length} schedules`);
+        return filtered;
+    }
+
+    /**
+     * Compare uploaded data with current calendar data
+     */
+    compareShiftData(verificationData, shiftType) {
+        const currentSchedules = this.getCurrentShiftSchedules(shiftType);
+        const discrepancies = [];
+        const matches = [];
+        
+        console.log(`🔍 VERIFICATION: Comparing ${verificationData.length} verification records with ${currentSchedules.length} current schedules`);
+        
+        // Create a map of current schedules for faster lookup
+        const currentScheduleMap = new Map();
+        currentSchedules.forEach(schedule => {
+            const employee = this.workforceManager.employees.find(emp => emp.id === schedule.employeeId);
+            const shiftType = this.workforceManager.shiftTypes.find(shift => shift.id === schedule.shiftId);
+            
+            if (employee && shiftType) {
+                const key = `${employee.name}_${schedule.date}`;
+                currentScheduleMap.set(key, {
+                    employeeName: employee.name,
+                    date: schedule.date,
+                    shiftName: shiftType.name,
+                    schedule: schedule
+                });
+            }
+        });
+        
+        console.log(`🔍 VERIFICATION: Created map with ${currentScheduleMap.size} current schedule entries`);
+        
+        // Compare each verification record with current data
+        verificationData.forEach(verificationSchedule => {
+            const key = `${verificationSchedule.employeeName}_${verificationSchedule.date}`;
+            const currentSchedule = currentScheduleMap.get(key);
+            
+            if (currentSchedule) {
+                // Check if shift assignments match
+                if (currentSchedule.shiftName === verificationSchedule.shiftName) {
+                    matches.push({
+                        employee: verificationSchedule.employeeName,
+                        date: verificationSchedule.date,
+                        shift: verificationSchedule.shiftName
+                    });
+                } else {
+                    discrepancies.push(`${verificationSchedule.employeeName} on ${verificationSchedule.date}: Expected "${verificationSchedule.shiftName}" but found "${currentSchedule.shiftName}"`);
+                }
+                
+                // Remove from map to track what wasn't in verification file
+                currentScheduleMap.delete(key);
+            } else {
+                discrepancies.push(`${verificationSchedule.employeeName} on ${verificationSchedule.date}: Expected "${verificationSchedule.shiftName}" but no assignment found in calendar`);
+            }
+        });
+        
+        // Check for schedules in calendar that weren't in verification file
+        currentScheduleMap.forEach((currentSchedule, key) => {
+            discrepancies.push(`${currentSchedule.employeeName} on ${currentSchedule.date}: Found "${currentSchedule.shiftName}" in calendar but not in verification file`);
+        });
+        
+        console.log(`🔍 VERIFICATION: Found ${matches.length} matches and ${discrepancies.length} discrepancies`);
+        
+        return {
+            matches: matches.length,
+            discrepancies: discrepancies,
+            totalVerified: verificationData.length,
+            totalCurrent: currentSchedules.length,
+            matchDetails: matches
+        };
+    }
+
+    /**
+     * Get current schedules for a specific shift type
+     */
+    getCurrentShiftSchedules(shiftType) {
+        // Filter schedules based on shift type
+        return this.workforceManager.schedules.filter(schedule => {
+            const employee = this.workforceManager.employees.find(emp => emp.id === schedule.employeeId);
+            if (!employee) return false;
+            
+            const employeeShiftType = this.workforceManager.employeeManager.determineEmployeeShiftType(employee);
+            return employeeShiftType.toLowerCase() === shiftType.toLowerCase();
+        });
+    }
+
+    /**
+     * Show verification results in a styled modal
+     */
+    showVerificationResults(result, shiftType) {
+        const shiftName = shiftType.charAt(0).toUpperCase() + shiftType.slice(1);
+        
+        // Create verification modal
+        this.createVerificationModal(result, shiftName);
+        
+        // Log detailed results to console for debugging
+        console.log(`🔍 VERIFICATION COMPLETE: ${shiftName} Shift Results:`, result);
+    }
+
+    /**
+     * Create styled verification results modal
+     */
+    createVerificationModal(result, shiftName) {
+        // Remove existing modal if any
+        const existingModal = document.getElementById('verificationModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const isSuccess = result.discrepancies.length === 0;
+        const statusIcon = isSuccess ? '✅' : '❌';
+        const statusText = isSuccess ? 'PASSED' : 'FAILED';
+        const statusClass = isSuccess ? 'success' : 'error';
+
+        const modalHTML = `
+            <div id="verificationModal" class="modal active">
+                <div class="modal-content verification-modal-content">
+                    <div class="modal-header verification-header ${statusClass}">
+                        <h2>${statusIcon} ${shiftName} Shift Verification - ${statusText}</h2>
+                        <button id="closeVerificationModal" class="btn btn-icon">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="modal-body verification-body">
+                        <div class="verification-summary">
+                            <h3>📊 Verification Summary</h3>
+                            <div class="summary-stats">
+                                <div class="stat-item ${isSuccess ? 'success' : ''}">
+                                    <span class="stat-label">Matching Schedules:</span>
+                                    <span class="stat-value">${result.matches}</span>
+                                </div>
+                                <div class="stat-item ${result.discrepancies.length > 0 ? 'error' : ''}">
+                                    <span class="stat-label">Discrepancies Found:</span>
+                                    <span class="stat-value">${result.discrepancies.length}</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Records in File:</span>
+                                    <span class="stat-value">${result.totalVerified}</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">Records in Calendar:</span>
+                                    <span class="stat-value">${result.totalCurrent}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        ${isSuccess ? this.createSuccessContent(result, shiftName) : this.createDiscrepancyContent(result)}
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.insertAdjacentHTML('beforeend', modalHTML);
+
+        // Bind close event
+        document.getElementById('closeVerificationModal').addEventListener('click', () => {
+            document.getElementById('verificationModal').remove();
+        });
+
+        // Close on background click
+        document.getElementById('verificationModal').addEventListener('click', (e) => {
+            if (e.target.id === 'verificationModal') {
+                document.getElementById('verificationModal').remove();
+            }
+        });
+    }
+
+    /**
+     * Create success content for verification modal
+     */
+    createSuccessContent(result, shiftName) {
+        return `
+            <div class="verification-success">
+                <div class="success-message">
+                    <i class="fas fa-check-circle"></i>
+                    <h3>Data matches perfectly!</h3>
+                    <p>All ${shiftName} shift assignments in the uploaded file match exactly with the current calendar.</p>
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Create discrepancy content for verification modal
+     */
+    createDiscrepancyContent(result) {
+        const discrepancyItems = result.discrepancies.slice(0, 20).map(discrepancy => 
+            `<div class="discrepancy-item">
+                <i class="fas fa-exclamation-triangle"></i>
+                <span>${discrepancy}</span>
+            </div>`
+        ).join('');
+
+        const truncatedNote = result.discrepancies.length > 20 
+            ? `<div class="truncated-note">... and ${result.discrepancies.length - 20} more discrepancies.</div>`
+            : '';
+
+        return `
+            <div class="verification-discrepancies">
+                <h3>🔍 Discrepancies Found</h3>
+                <div class="discrepancy-list">
+                    ${discrepancyItems}
+                    ${truncatedNote}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Show loading message
+     */
+    showLoadingMessage(text) {
+        const loading = document.createElement('div');
+        loading.id = 'verificationLoading';
+        loading.className = 'verification-loading';
+        loading.innerHTML = `
+            <div class="loading-content">
+                <i class="fas fa-spinner fa-spin"></i>
+                <span>${text}</span>
+            </div>
+        `;
+        document.body.appendChild(loading);
+        return loading;
+    }
+
+    /**
+     * Hide loading message
+     */
+    hideLoadingMessage(loadingElement) {
+        if (loadingElement && loadingElement.parentNode) {
+            loadingElement.parentNode.removeChild(loadingElement);
+        }
+    }
+
+    /**
+     * Test function to manually trigger verification (for debugging)
+     */
+    testVerification(shiftType = 'day') {
+        console.log(`🔍 TEST: Manual verification test for ${shiftType}`);
+        this.initiateShiftVerification(shiftType);
     }
 }
 

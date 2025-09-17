@@ -68,15 +68,35 @@ class HybridDataManager {
         const options = { source: 'cache' }; // Try cache first, fallback to server
         
         const [employeesSnapshot, shiftTypesSnapshot, jobRolesSnapshot, schedulesSnapshot, rulesSnapshot] = await Promise.all([
-            orgRef.collection('employees').get(options),
+            orgRef.collection('employees').orderBy('orderIndex').get(options), // Order by orderIndex to preserve original data file order
             orgRef.collection('shiftTypes').get(options),
             orgRef.collection('jobRoles').get(options),
             orgRef.collection('schedules').get(options),
             orgRef.collection('rules').get(options)
         ]);
 
+        // Sort employees by orderIndex, with fallback to document ID for existing data
+        const employees = employeesSnapshot.docs
+            .map(doc => ({ ...doc.data(), docId: doc.id }))
+            .sort((a, b) => {
+                // If both have orderIndex, sort by that
+                if (a.orderIndex !== undefined && b.orderIndex !== undefined) {
+                    return a.orderIndex - b.orderIndex;
+                }
+                // If only one has orderIndex, prioritize it
+                if (a.orderIndex !== undefined) return -1;
+                if (b.orderIndex !== undefined) return 1;
+                // If neither has orderIndex, sort by document ID (creation order)
+                return a.docId.localeCompare(b.docId);
+            })
+            .map(emp => {
+                // Remove docId from final result
+                const { docId, ...employee } = emp;
+                return employee;
+            });
+
         return {
-            employees: employeesSnapshot.docs.map(doc => doc.data()),
+            employees,
             shiftTypes: shiftTypesSnapshot.docs.map(doc => doc.data()),
             jobRoles: jobRolesSnapshot.docs.map(doc => doc.data()),
             schedules: schedulesSnapshot.docs.map(doc => doc.data()),

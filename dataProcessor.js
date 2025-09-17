@@ -338,7 +338,8 @@ function processScheduleData(data, generateId, currentWeekStart) {
             id: generateId(),
             name: employeeName,
             role: jobRole,
-            shifts: [] // Store actual shift assignments
+            shifts: [], // Store actual shift assignments
+            orderIndex: rowIndex // Preserve original order from data file
         };
 
         // Process shift assignments for each day column after name/job
@@ -438,7 +439,8 @@ function processXlsxScheduleData(data, generateId, currentWeekStart, xlsxMetadat
                     id: employeeId,
                     name: employeeName,
                     role: jobRole,
-                    shifts: []
+                    shifts: [],
+                    orderIndex: index // Preserve original order from data file
                 };
 
                 employees.push(employee);

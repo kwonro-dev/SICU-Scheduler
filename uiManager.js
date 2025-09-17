@@ -78,7 +78,6 @@ class UIManager {
             scrollLeft = container.scrollLeft;
             scrollTop = container.scrollTop;
             container.classList.add('dragging');
-            console.log(`📱 Touch started ${containerSelector} at position:`, { x: startX, y: startY });
         });
 
         container.addEventListener('touchend', stopDragging);
@@ -97,8 +96,6 @@ class UIManager {
             const walkY = (y - startY) * 2;
             const newScrollTop = scrollTop - walkY;
             container.scrollTop = newScrollTop;
-
-            console.log(`📱 Touch moving ${containerSelector} - position:`, { x, y }, 'walk:', { x: walkX, y: walkY });
         });
 
         console.log(`✅ Drag scroll functionality bound successfully for ${containerSelector}`);
@@ -119,25 +116,44 @@ class UIManager {
         let isSyncingCalendar = false;
         let isSyncingSummary = false;
 
-        // Function to sync summary scroll when calendar scrolls
-        const syncSummaryFromCalendar = () => {
+        // Throttle function for better scroll performance
+        const throttle = (func, delay) => {
+            let timeoutId;
+            let lastExecTime = 0;
+            return function (...args) {
+                const currentTime = Date.now();
+                if (currentTime - lastExecTime > delay) {
+                    func.apply(this, args);
+                    lastExecTime = currentTime;
+                } else {
+                    clearTimeout(timeoutId);
+                    timeoutId = setTimeout(() => {
+                        func.apply(this, args);
+                        lastExecTime = Date.now();
+                    }, delay - (currentTime - lastExecTime));
+                }
+            };
+        };
+
+        // Function to sync summary scroll when calendar scrolls (throttled)
+        const syncSummaryFromCalendar = throttle(() => {
             if (isSyncingSummary) return; // Prevent infinite loop
             isSyncingCalendar = true;
             summaryContainer.scrollLeft = calendarContainer.scrollLeft;
             isSyncingCalendar = false;
-        };
+        }, 16); // ~60fps
 
-        // Function to sync calendar scroll when summary scrolls
-        const syncCalendarFromSummary = () => {
+        // Function to sync calendar scroll when summary scrolls (throttled)
+        const syncCalendarFromSummary = throttle(() => {
             if (isSyncingCalendar) return; // Prevent infinite loop
             isSyncingSummary = true;
             calendarContainer.scrollLeft = summaryContainer.scrollLeft;
             isSyncingSummary = false;
-        };
+        }, 16); // ~60fps
 
-        // Add scroll event listeners
-        calendarContainer.addEventListener('scroll', syncSummaryFromCalendar);
-        summaryContainer.addEventListener('scroll', syncCalendarFromSummary);
+        // Add scroll event listeners with passive option for better performance
+        calendarContainer.addEventListener('scroll', syncSummaryFromCalendar, { passive: true });
+        summaryContainer.addEventListener('scroll', syncCalendarFromSummary, { passive: true });
 
         console.log('✅ Synchronized scrolling bound successfully');
     }
@@ -459,22 +475,55 @@ class UIManager {
 
     // Bind right-click events to shift cells
     bindShiftCellEvents() {
-        const shiftCells = document.querySelectorAll('.shift-cell');
+        // Target both existing shift cells AND empty cells that can become shift cells
+        const allShiftCells = document.querySelectorAll('.shift-cell, .matrix-cell[data-employee-id][data-date]');
 
-        if (!shiftCells || shiftCells.length === 0) {
+        if (!allShiftCells || allShiftCells.length === 0) {
             console.log('No shift cells found to bind events to');
             return;
         }
 
-        shiftCells.forEach(cell => {
+        console.log(`🔧 Binding events to ${allShiftCells.length} shift cells (including empty cells)`);
+
+        // Add global context menu prevention for the schedule matrix
+        const scheduleMatrix = document.getElementById('scheduleMatrix');
+        if (scheduleMatrix) {
+            // Remove any existing global context menu listener
+            if (this.globalContextMenuHandler) {
+                scheduleMatrix.removeEventListener('contextmenu', this.globalContextMenuHandler);
+            }
+
+            // Add new global context menu prevention
+            this.globalContextMenuHandler = (e) => {
+                // Only prevent if it's on a shift cell or matrix cell
+                if (e.target.closest('.shift-cell, .matrix-cell[data-employee-id]')) {
+                    console.log('🛡️ GLOBAL CONTEXT MENU: Preventing on schedule matrix cell');
+                    e.preventDefault();
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                }
+            };
+
+            scheduleMatrix.addEventListener('contextmenu', this.globalContextMenuHandler, true); // Capture phase
+        }
+
+        allShiftCells.forEach(cell => {
+            // Remove any existing event listeners by cloning the element
+            const newCell = cell.cloneNode(true);
+            cell.parentNode.replaceChild(newCell, cell);
+            
+            // Now bind events to the clean cell
             // Use mousedown for immediate response
-            cell.addEventListener('mousedown', (e) => {
+            newCell.addEventListener('mousedown', (e) => {
                 // Only respond to right mouse button (button 2)
                 if (e.button !== 2) return;
-                
+
+                console.log('🖱️ MOUSEDOWN EVENT: Right-click detected on shift cell');
                 try {
                     e.preventDefault();
                     e.stopPropagation();
+                    e.stopImmediatePropagation();
+                    console.log('🛡️ MOUSEDOWN: Prevented default and propagation');
                     const employeeId = cell.dataset.employeeId;
                     const date = cell.dataset.date;
                     const currentShiftId = cell.dataset.shiftId;
@@ -484,19 +533,62 @@ class UIManager {
                         return;
                     }
 
+                    // Check if editing is locked for this employee's shift type
+                    const employee = this.workforceManager.employees.find(emp => emp.id === employeeId);
+                    if (employee) {
+                        const employeeShiftType = this.workforceManager.employeeManager.determineEmployeeShiftType(employee);
+                        const shiftTypeKey = employeeShiftType.toLowerCase();
+                        
+                        console.log(`🔍 EDITING CHECK: Employee ${employee.name} is ${employeeShiftType} shift type`);
+                        console.log(`🔍 EDITING CHECK: Checking if ${shiftTypeKey} editing is locked...`);
+                        
+                        const isLocked = this.workforceManager.calendarRenderer.isShiftEditingLocked(shiftTypeKey);
+                        console.log(`🔍 EDITING CHECK: ${shiftTypeKey} shift locked = ${isLocked}`);
+                        
+                        if (isLocked) {
+                            console.log(`🚫 EDITING BLOCKED: ${shiftTypeKey} shift editing is locked, showing message`);
+                            // Show locked message instead of context menu
+                            this.showLockedMessage(e, shiftTypeKey);
+                            return;
+                        } else {
+                            console.log(`✅ EDITING ALLOWED: ${shiftTypeKey} shift editing is not locked, showing context menu`);
+                        }
+                    } else {
+                        console.log(`⚠️ EDITING CHECK: Employee not found for ID ${employeeId}`);
+                    }
+
                     // Show context menu
-                    this.showContextMenu(e, employeeId, date, currentShiftId, cell);
+                    this.showContextMenu(e, employeeId, date, currentShiftId, newCell);
                 } catch (error) {
                     console.error('Error handling shift cell context menu:', error);
                 }
             });
 
             // Also prevent contextmenu event to stop browser menu
-            cell.addEventListener('contextmenu', (e) => {
+            newCell.addEventListener('contextmenu', (e) => {
+                console.log('🛡️ CONTEXT MENU EVENT: Preventing default browser menu');
                 e.preventDefault();
                 e.stopPropagation();
+                e.stopImmediatePropagation();
             });
+
+            // Additional safety: use capture phase for contextmenu
+            newCell.addEventListener('contextmenu', (e) => {
+                console.log('🛡️ CONTEXT MENU CAPTURE: Preventing default browser menu');
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }, true); // Capture phase
         });
+    }
+
+    // Cleanup global context menu handler
+    cleanupGlobalContextMenu() {
+        const scheduleMatrix = document.getElementById('scheduleMatrix');
+        if (scheduleMatrix && this.globalContextMenuHandler) {
+            scheduleMatrix.removeEventListener('contextmenu', this.globalContextMenuHandler);
+            this.globalContextMenuHandler = null;
+        }
     }
 
     // Update grid template based on visible columns
@@ -519,6 +611,40 @@ class UIManager {
 
         matrixContainer.style.gridTemplateColumns = gridTemplate;
         console.log(`Updated grid template: ${gridTemplate} (${totalColumns} total columns, ${visibleCountColumns} visible count columns)`);
+    }
+
+    /**
+     * Show locked message when trying to edit locked shift
+     */
+    showLockedMessage(e, shiftType) {
+        // Remove any existing tooltip
+        const existingTooltip = document.getElementById('lockedShiftTooltip');
+        if (existingTooltip) {
+            existingTooltip.remove();
+        }
+
+        // Create new locked message tooltip
+        const tooltip = document.createElement('div');
+        tooltip.id = 'lockedShiftTooltip';
+        tooltip.className = 'locked-shift-tooltip';
+        tooltip.textContent = `${shiftType.charAt(0).toUpperCase() + shiftType.slice(1)} shift editing is locked`;
+        
+        document.body.appendChild(tooltip);
+
+        // Position tooltip
+        const rect = tooltip.getBoundingClientRect();
+        tooltip.style.left = (e.pageX + 10) + 'px';
+        tooltip.style.top = (e.pageY - 30) + 'px';
+        tooltip.style.display = 'block';
+
+        console.log(`Showing locked message for ${shiftType} shift`);
+
+        // Hide tooltip after 3 seconds
+        setTimeout(() => {
+            if (tooltip && tooltip.parentNode) {
+                tooltip.remove();
+            }
+        }, 3000);
     }
 }
 

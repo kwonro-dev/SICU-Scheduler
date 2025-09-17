@@ -28,6 +28,17 @@ class FilterManager {
         // Clear any saved column visibility data from localStorage
         localStorage.removeItem('columnVisibility');
         this.sortOrder = this.workforceManager.dataManager.loadData('sortOrder') || 'original';
+        
+        // Debouncing for filter updates
+        this.filterUpdateTimeout = null;
+        this.pendingFilterUpdate = false;
+        
+        // Cache for filtered employees to avoid recalculation
+        this.filteredEmployeesCache = null;
+        this.lastFilterState = null;
+        
+        // Cache for expensive role operations
+        this.roleFilterCache = new Map();
     }
 
     // Initialize calendar filter states from saved preferences
@@ -141,16 +152,23 @@ class FilterManager {
             this.shiftFilters['all-shifts'] = allActive || allInactive;
         }
 
-        console.log('New filter state:', this.shiftFilters);
+        // Performance logging only in development
+        if (window.location.hostname === 'localhost') {
+            console.log('New filter state:', this.shiftFilters);
+        }
 
         // Save filter states
         this.workforceManager.dataManager.saveData('shiftFilters', this.shiftFilters);
 
+        // Invalidate cache since filters changed
+        this.filteredEmployeesCache = null;
+        this.roleFilterCache.clear();
+
         // Update button states
         this.updateShiftFilterStates();
 
-        // Apply filters
-        this.applyCalendarFilters();
+        // Apply filters with debouncing
+        this.applyCalendarFiltersDebounced();
     }
 
     // Toggle role filter
@@ -184,13 +202,20 @@ class FilterManager {
         // Save filter states
         this.workforceManager.dataManager.saveData('roleFilters', this.roleFilters);
 
-        console.log('🎛️ New role filter state:', this.roleFilters);
+        // Performance logging only in development
+        if (window.location.hostname === 'localhost') {
+            console.log('🎛️ New role filter state:', this.roleFilters);
+        }
+
+        // Invalidate cache since filters changed
+        this.filteredEmployeesCache = null;
+        this.roleFilterCache.clear();
 
         // Update button states
         this.updateRoleFilterStates();
 
-        // Apply filters
-        this.applyCalendarFilters();
+        // Apply filters with debouncing
+        this.applyCalendarFiltersDebounced();
     }
 
     // Update shift filter button states
@@ -223,10 +248,8 @@ class FilterManager {
 
     // Apply calendar filters to show/hide employees
     applyCalendarFilters() {
-        console.log('🎯 Applying calendar filters...');
         const matrixContainer = document.getElementById('scheduleMatrix');
         if (!matrixContainer) {
-            console.log('❌ Matrix container not found');
             return;
         }
 
@@ -234,7 +257,6 @@ class FilterManager {
         matrixContainer.classList.remove('filtered-view');
 
         // Re-render the matrix with filters applied
-        console.log('🔄 Re-rendering schedule matrix with filters...');
         this.workforceManager.calendarRenderer.renderScheduleMatrix();
 
         // Re-initialize filter buttons after rendering
@@ -244,7 +266,64 @@ class FilterManager {
         // Add filtered class to enable filtered styling
         matrixContainer.classList.add('filtered-view');
 
-        console.log('✅ Filters applied successfully');
+        // Performance logging only in development
+        if (window.location.hostname === 'localhost') {
+            console.log('✅ Filters applied successfully');
+        }
+    }
+
+    // Debounced version of applyCalendarFilters to prevent rapid successive calls
+    applyCalendarFiltersDebounced() {
+        // Clear existing timeout
+        if (this.filterUpdateTimeout) {
+            clearTimeout(this.filterUpdateTimeout);
+        }
+
+        // Use requestAnimationFrame for smoother updates
+        this.filterUpdateTimeout = setTimeout(() => {
+            requestAnimationFrame(() => {
+                this.applyCalendarFilters();
+                this.pendingFilterUpdate = false;
+            });
+        }, 4); // 4ms + RAF = ultra-responsive
+    }
+
+    // Get cached filtered employees or calculate if cache is invalid
+    getCachedFilteredEmployees() {
+        const currentFilterState = JSON.stringify({
+            shiftFilters: this.shiftFilters,
+            roleFilters: this.roleFilters,
+            sortOrder: this.sortOrder
+        });
+
+        // For "original" sort, always get fresh data to avoid cache corruption
+        if (this.sortOrder === 'original') {
+            console.log('🔄 Original sort - bypassing cache to get fresh data');
+            const filteredEmployees = this.workforceManager.employees.filter(employee => 
+                this.shouldShowEmployee(employee)
+            );
+            console.log('🔍 Fresh filtered employees (first 5):', filteredEmployees.slice(0, 5).map(e => e.name));
+            return this.getSortedEmployees(filteredEmployees);
+        }
+
+        // Return cached result if filter state hasn't changed
+        if (this.filteredEmployeesCache && this.lastFilterState === currentFilterState) {
+            return this.filteredEmployeesCache;
+        }
+
+        // Calculate filtered employees
+        const filteredEmployees = this.workforceManager.employees.filter(employee => 
+            this.shouldShowEmployee(employee)
+        );
+
+        // Sort employees
+        const sortedEmployees = this.getSortedEmployees(filteredEmployees);
+
+        // Cache the result
+        this.filteredEmployeesCache = sortedEmployees;
+        this.lastFilterState = currentFilterState;
+
+        return sortedEmployees;
     }
 
     /**
@@ -265,10 +344,7 @@ class FilterManager {
         // Check charge-shifts filter
         const chargeMatch = !this.roleFilters['charge-shifts'] || this.hasChargeShifts(employee);
 
-        // Debug: Log filtering decision for first few employees
-        if (employee.name && (employee.name.includes('John') || employee.name.includes('Jane'))) {
-            console.log(`🎯 Filtering ${employee.name}: shiftMatch=${shiftMatch}, roleMatch=${roleMatch}, chargeMatch=${chargeMatch}, all-roles=${this.roleFilters['all-roles']}, employeeRole=${this.roleFilters[employee.roleId]}, shouldShow=${shiftMatch && roleMatch && chargeMatch}`);
-        }
+        // Debug logging removed for performance
 
         return shiftMatch && roleMatch && chargeMatch;
     }
@@ -312,8 +388,14 @@ class FilterManager {
 
     // Helper method to check if a role type should be visible in summary
     shouldShowRoleInSummary(roleType) {
+        // Check cache first
+        const cacheKey = `${roleType}_${JSON.stringify(this.roleFilters)}`;
+        if (this.roleFilterCache.has(cacheKey)) {
+            return this.roleFilterCache.get(cacheKey);
+        }
+
         // Check if there are any employees of this role type that pass the ROLE filters only
-        return this.workforceManager.employees.some(employee => {
+        const result = this.workforceManager.employees.some(employee => {
             // Apply only role filtering logic, not shift filtering
             const roleMatch = this.roleFilters['all-roles'] || this.roleFilters[employee.roleId];
             if (!roleMatch) {
@@ -357,6 +439,10 @@ class FilterManager {
                     return false;
             }
         });
+
+        // Cache the result
+        this.roleFilterCache.set(cacheKey, result);
+        return result;
     }
 
     // Toggle column visibility
@@ -561,7 +647,7 @@ class FilterManager {
     // Check if employee has any shifts containing "Charg"
     hasChargeShifts(employee) {
         // Get time interval from localStorage or use 48 as default
-        const timeInterval = parseInt(localStorage.getItem('timeInterval')) || 42;
+        const timeInterval = this.workforceManager.calendarRenderer?.getCachedTimeInterval() || 42;
         
         // Use the configured start date
         const calendarStartDate = new Date(this.workforceManager.currentWeekStart.getFullYear(), this.workforceManager.currentWeekStart.getMonth(), this.workforceManager.currentWeekStart.getDate());
@@ -604,6 +690,13 @@ class FilterManager {
     setSortOrder(sortValue) {
         this.sortOrder = sortValue;
         this.workforceManager.dataManager.saveData('sortOrder', this.sortOrder);
+        
+        // Clear cache when switching to original sort to ensure fresh data
+        if (sortValue === 'original') {
+            this.filteredEmployeesCache = null;
+            this.lastFilterState = null;
+        }
+        
         this.applyCalendarFilters(); // This will trigger re-render
     }
 
@@ -678,7 +771,18 @@ class FilterManager {
                 break;
             case 'original':
             default:
-                sortedEmployees = employees; // No sorting
+                // For original order, we need to preserve the order from the data file
+                // Sort by orderIndex to maintain the original import order
+                console.log('🔍 Original order - first 5 employees before sorting:', employees.slice(0, 5).map(e => e.name));
+                sortedEmployees = [...employees].sort((a, b) => {
+                    // Sort by orderIndex if available, otherwise by name for consistency
+                    if (a.orderIndex !== undefined && b.orderIndex !== undefined) {
+                        return a.orderIndex - b.orderIndex;
+                    }
+                    // Fallback to name sorting if orderIndex is missing
+                    return a.name.localeCompare(b.name);
+                });
+                console.log('🔍 Original order - first 5 employees after sorting:', sortedEmployees.slice(0, 5).map(e => e.name));
         }
         
         // Debug: Log first few sorted employee names

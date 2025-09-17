@@ -9,7 +9,10 @@ class InitializationManager {
     // Initialize Firebase and load data
     async initializeFirebase() {
         this.workforceManager.initStartTime = performance.now();
-        console.log('🚀 Starting Firebase initialization...');
+        // Performance logging only in development
+        if (window.location.hostname === 'localhost') {
+            console.log('🚀 Starting Firebase initialization...');
+        }
         
         try {
             await this.workforceManager.firebaseManager.initialize();
@@ -32,12 +35,10 @@ class InitializationManager {
             }
 
             // Load data using hybrid approach (Firestore + cache + offline persistence)
-            console.log('🔄 Loading data with hybrid approach...');
-            console.log('🔐 Current user context:', {
-                uid: this.workforceManager.authManager?.user?.uid,
-                email: this.workforceManager.authManager?.user?.email,
-                isAdmin: this.workforceManager.authManager?.adminEmails?.has(this.workforceManager.authManager?.user?.email?.toLowerCase())
-            });
+            // Data loading logging only in development
+            if (window.location.hostname === 'localhost') {
+                console.log('🔄 Loading data with hybrid approach...');
+            }
             await this.workforceManager.dataManager.loadDataHybrid();
             console.log('✅ Data loaded from Firestore:', {
                 employees: this.workforceManager.employees.length,
@@ -177,7 +178,7 @@ class InitializationManager {
                     const renderTime = performance.now() - renderStart;
                     console.log(`🔄 Debounced render completed in ${renderTime.toFixed(2)}ms`);
                 }
-            }, 25); // Reduced to 25ms debounce for better responsiveness
+            }, 100); // Increased to 100ms for better batching of updates
         };
 
         // Listen for employee changes
@@ -331,7 +332,37 @@ class InitializationManager {
                 console.log('📊 Skipping first schedules listener event (initial data load)');
                 return; // Skip first event (initial data load)
             }
-            if (JSON.stringify(this.workforceManager.schedules) === JSON.stringify(schedules)) return; // Skip if no change
+            
+            // More robust change detection - compare schedule counts and key properties
+            const currentSchedules = this.workforceManager.schedules || [];
+            console.log('📊 Schedule change detection:', {
+                currentCount: currentSchedules.length,
+                newCount: schedules.length,
+                currentIds: currentSchedules.map(s => s.id).sort(),
+                newIds: schedules.map(s => s.id).sort()
+            });
+            
+            const hasChanges = currentSchedules.length !== schedules.length || 
+                schedules.some(newSchedule => {
+                    const existing = currentSchedules.find(s => s.id === newSchedule.id);
+                    const changed = !existing || existing.shiftId !== newSchedule.shiftId || existing.date !== newSchedule.date;
+                    if (changed && existing) {
+                        console.log('📊 Schedule change detected:', {
+                            id: newSchedule.id,
+                            oldShift: existing.shiftId,
+                            newShift: newSchedule.shiftId,
+                            date: newSchedule.date
+                        });
+                    }
+                    return changed;
+                });
+            
+            if (!hasChanges) {
+                console.log('📊 Schedules listener - no meaningful changes detected, skipping render');
+                return;
+            }
+            
+            console.log('📊 Schedules updated from Firestore - triggering render');
             this.workforceManager.schedules = schedules;
             this.workforceManager.debouncedRender();
         });

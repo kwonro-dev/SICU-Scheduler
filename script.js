@@ -866,10 +866,25 @@ class WorkforceScheduleManager {
 
     // Clear only schedules (calendar) while keeping employees, shift types, and job roles
     async clearCalendarOnly() {
-        if (await showConfirm('Clear calendar only? This will remove all shift assignments but keep Employees, Shift Types, and Job Roles.', 'Clear Calendar')) {
+        if (await showConfirm('Clear calendar only? This will remove all shift assignments but keep Employees, Shift Types, and Job Roles.\n\n⚠️ This operation may take a few seconds to complete.', 'Clear Calendar')) {
             try {
                 // Set flag to prevent real-time listener updates during bulk operation
                 this.isResetting = true;
+
+                // Show progress modal
+                const progressModal = document.createElement('div');
+                progressModal.style.cssText = `
+                    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                    background: rgba(0,0,0,0.7); display: flex; align-items: center;
+                    justify-content: center; z-index: 10000; color: white;
+                `;
+                progressModal.innerHTML = `
+                    <div style="background: white; color: black; padding: 20px; border-radius: 8px; text-align: center;">
+                        <div style="margin-bottom: 10px;">🧹 Clearing Calendar...</div>
+                        <div style="font-size: 14px; color: #666;">This may take a few seconds</div>
+                    </div>
+                `;
+                document.body.appendChild(progressModal);
 
                 // Clear Firestore schedules collection if Firebase is available
                 if (this.firebaseManager) {
@@ -878,23 +893,33 @@ class WorkforceScheduleManager {
                     console.log('✅ Firestore schedules cleared');
                 }
 
-            // Clear schedules array
-            this.schedules = [];
+                // Clear schedules array
+                this.schedules = [];
 
-            // Persist only schedules change
-            localStorage.removeItem('workforce_schedules');
+                // Persist only schedules change
+                localStorage.removeItem('workforce_schedules');
 
                 // Clear the resetting flag
                 this.isResetting = false;
 
-            // Re-render views impacted by schedules
-            this.calendarRenderer.renderScheduleMatrix();
-            this.viewRenderer.renderBalanceView && this.viewRenderer.renderBalanceView();
+                // Remove progress modal
+                document.body.removeChild(progressModal);
 
-            await showAlert('Calendar cleared. All shift assignments have been removed.', 'Calendar Cleared');
+                // Re-render views impacted by schedules
+                this.calendarRenderer.renderScheduleMatrix();
+                this.viewRenderer.renderBalanceView && this.viewRenderer.renderBalanceView();
+
+                await showAlert('Calendar cleared. All shift assignments have been removed.', 'Calendar Cleared');
             } catch (error) {
                 console.error('❌ Error during calendar clear:', error);
                 this.isResetting = false; // Clear flag on error
+                
+                // Remove progress modal if it exists
+                const progressModal = document.querySelector('[style*="z-index: 10000"]');
+                if (progressModal) {
+                    document.body.removeChild(progressModal);
+                }
+                
                 await showAlert('Error occurred during calendar clear. Please try again.', 'Clear Error');
             }
         }

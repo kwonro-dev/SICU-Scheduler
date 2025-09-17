@@ -11,22 +11,30 @@ class DataManager {
      */
     async loadDataHybrid() {
         const startTime = performance.now();
-        console.log('🚀 Hybrid data loading started...');
+        // Performance logging only in development
+        if (window.location.hostname === 'localhost') {
+            console.log('🚀 Hybrid data loading started...');
+        }
 
         try {
             // Use hybrid data manager for optimal performance
             const data = await this.workforceManager.hybridDataManager.loadData();
             
             // Assign data to instance variables
-            console.log('📊 Assigning loaded data to workforceManager:', {
-                employees: data.employees?.length || 0,
-                shiftTypes: data.shiftTypes?.length || 0,
-                jobRoles: data.jobRoles?.length || 0,
-                schedules: data.schedules?.length || 0,
-                rules: data.rules?.length || 0
-            });
+            // Data assignment logging only in development
+            if (window.location.hostname === 'localhost') {
+                console.log('📊 Data loaded:', {
+                    employees: data.employees?.length || 0,
+                    schedules: data.schedules?.length || 0
+                });
+            }
             
             this.workforceManager.employees = data.employees || [];
+            
+            // Debug: Log original employee order when data is loaded
+            if (this.workforceManager.employees.length > 0) {
+                console.log('🔍 Original employees loaded (first 5):', this.workforceManager.employees.slice(0, 5).map(e => e.name));
+            }
             this.workforceManager.shiftTypes = data.shiftTypes || [];
             this.workforceManager.jobRoles = data.jobRoles || [];
             this.workforceManager.schedules = data.schedules || [];
