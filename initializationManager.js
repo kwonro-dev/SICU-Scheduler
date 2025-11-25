@@ -7,9 +7,9 @@ class InitializationManager {
     }
 
     // Initialize Firebase and load data
+    // OPTIMIZED: Removed extra Firebase call, eliminated duplicate renders
     async initializeFirebase() {
         this.workforceManager.initStartTime = performance.now();
-        // Performance logging only in development
         if (window.location.hostname === 'localhost') {
             console.log('🚀 Starting Firebase initialization...');
         }
@@ -17,85 +17,65 @@ class InitializationManager {
         try {
             await this.workforceManager.firebaseManager.initialize();
 
-            // Check if we need to migrate from localStorage (only once)
+            // Load data using hybrid approach (Firestore + cache + offline persistence)
+            if (window.location.hostname === 'localhost') {
+                console.log('🔄 Loading data with hybrid approach...');
+            }
+            await this.workforceManager.dataManager.loadDataHybrid();
+            
+            // OPTIMIZATION: Check for migration AFTER loading (uses already-loaded data)
             const hasLocalData = localStorage.getItem('workforce_employees') ||
                                 localStorage.getItem('workforce_shiftTypes') ||
                                 localStorage.getItem('workforce_jobRoles') ||
                                 localStorage.getItem('workforce_schedules');
 
-            // Check if Firestore already has data (skip migration if it does)
-            const existingEmployees = await this.workforceManager.firebaseManager.getEmployees();
-            const shouldMigrate = hasLocalData && existingEmployees.length === 0;
-
-            if (shouldMigrate) {
+            // If we have local data but Firestore was empty, migrate
+            if (hasLocalData && this.workforceManager.employees.length === 0) {
                 console.log('Found localStorage data and empty Firestore, migrating...');
                 await this.workforceManager.firebaseManager.migrateFromLocalStorage();
-                // Clear localStorage after successful migration
                 this.workforceManager.dataManager.clearLocalStorage();
+                // Reload after migration
+                await this.workforceManager.dataManager.loadDataHybrid();
             }
 
-            // Load data using hybrid approach (Firestore + cache + offline persistence)
-            // Data loading logging only in development
-            if (window.location.hostname === 'localhost') {
-                console.log('🔄 Loading data with hybrid approach...');
-            }
-            await this.workforceManager.dataManager.loadDataHybrid();
-            console.log('✅ Data loaded from Firestore:', {
+            console.log('✅ Data loaded:', {
                 employees: this.workforceManager.employees.length,
-                shiftTypes: this.workforceManager.shiftTypes.length,
-                jobRoles: this.workforceManager.jobRoles.length,
                 schedules: this.workforceManager.schedules.length
             });
 
-            // Clean up employee data after loading (before setting up listeners)
+            // OPTIMIZATION: Batch all pre-render operations
             this.workforceManager.dataManager.cleanEmployeeData(false);
-
-            // Ensure job roles are properly assigned to employees
             this.workforceManager.dataManager.ensureJobRoleAssignments();
-
-            // Update role badge styles after data is loaded (BEFORE rendering calendar)
+            
+            // PERFORMANCE FIX: Pre-cache employee shift types to avoid repeated calculations
+            this.cacheEmployeeShiftTypes();
+            
             this.workforceManager.updateRoleBadgeStyles();
-
-            // Set calendar start date to first date in dataset if no saved date exists
             this.setOptimalStartDate();
 
-            // Initialize rule engine after data is loaded
+            // Initialize rule engine (defer if slow)
             if (this.workforceManager.ruleEngine) {
-                await this.workforceManager.ruleEngine.initialize();
-                console.log('✅ Rule Engine initialized with data');
+                // Don't await - let it initialize in background
+                this.workforceManager.ruleEngine.initialize().then(() => {
+                    console.log('✅ Rule Engine initialized');
+                });
             }
 
-            // Now that data is loaded, render the calendar
-            console.log('🎨 Rendering calendar with loaded data...');
-            console.log('🔐 User context before calendar render:', {
-                uid: this.workforceManager.authManager?.user?.uid,
-                email: this.workforceManager.authManager?.user?.email,
-                isAdmin: this.workforceManager.authManager?.adminEmails?.has(this.workforceManager.authManager?.user?.email?.toLowerCase())
-            });
-            this.workforceManager.switchView('calendar');
-
-            // Create role filter buttons after data is loaded
-            this.workforceManager.filterManager.createRoleFilterButtons();
-
-            // Set up real-time listeners AFTER initial load to prevent duplicate renders
-            console.log('🔄 Setting up real-time listeners...');
+            // Set up real-time listeners BEFORE first render
             this.setupRealtimeListeners();
-            console.log('✅ Real-time listeners set up');
-
-            // Mark initial load as complete to enable real-time rendering
+            
+            // Mark initial load as complete
             this.workforceManager.initialLoadComplete = true;
-
-            // Clear the skipFirstListenerEvents flag AFTER data is loaded and listeners are set up
             this.workforceManager.skipFirstListenerEvents = false;
-            console.log('🔄 Real-time listeners now active - will respond to actual changes');
 
-            // Trigger the debounced render for the initial view
-            console.log('🔄 Triggering initial render through debounced path...');
-            this.workforceManager.debouncedRender();
+            // OPTIMIZATION: Single render - removed duplicate debouncedRender call
+            console.log('🎨 Rendering calendar...');
+            this.workforceManager.switchView('calendar');
+            this.workforceManager.filterManager.createRoleFilterButtons();
 
             // Measure total initialization time
             const totalTime = performance.now() - this.workforceManager.initStartTime;
-            console.log(`✅ Firebase initialized successfully in ${totalTime.toFixed(2)}ms`);
+            console.log(`✅ Initialized in ${totalTime.toFixed(2)}ms`);
         } catch (error) {
             console.error('❌ Firebase initialization failed:', error);
             // Fallback to localStorage if Firebase fails
@@ -104,6 +84,8 @@ class InitializationManager {
             this.workforceManager.dataManager.cleanEmployeeData(false);
             // Ensure job roles are properly assigned
             this.workforceManager.dataManager.ensureJobRoleAssignments();
+            // PERFORMANCE FIX: Pre-cache employee shift types
+            this.cacheEmployeeShiftTypes();
             // Update role badge styles after data is loaded (BEFORE rendering calendar)
             this.workforceManager.updateRoleBadgeStyles();
             // Set calendar start date to first date in dataset if no saved date exists
@@ -206,6 +188,9 @@ class InitializationManager {
                 return; // Skip if no change
             }
             
+            // PERFORMANCE: Invalidate caches when data changes from real-time sync
+            this.workforceManager.invalidateCaches('employees');
+            
             // Check if this is just a shiftType update (which happens during shift assignments)
             const currentEmployees = this.workforceManager.employees;
             
@@ -300,6 +285,8 @@ class InitializationManager {
             }
             if (JSON.stringify(this.workforceManager.shiftTypes) === JSON.stringify(shiftTypes)) return; // Skip if no change
             console.log('📊 Shift types updated from Firestore - triggering render');
+            // PERFORMANCE: Invalidate caches
+            this.workforceManager.invalidateCaches('shiftTypes');
             this.workforceManager.shiftTypes = shiftTypes;
             this.workforceManager.debouncedRender();
         });
@@ -317,6 +304,8 @@ class InitializationManager {
             }
             if (JSON.stringify(this.workforceManager.jobRoles) === JSON.stringify(jobRoles)) return; // Skip if no change
             console.log('📊 Job roles updated from Firestore - triggering render');
+            // PERFORMANCE: Invalidate caches
+            this.workforceManager.invalidateCaches('jobRoles');
             this.workforceManager.jobRoles = jobRoles;
             this.workforceManager.debouncedRender();
         });
@@ -363,6 +352,8 @@ class InitializationManager {
             }
             
             console.log('📊 Schedules updated from Firestore - triggering render');
+            // PERFORMANCE: Invalidate caches
+            this.workforceManager.invalidateCaches('schedules');
             this.workforceManager.schedules = schedules;
             this.workforceManager.debouncedRender();
         });
@@ -436,6 +427,28 @@ class InitializationManager {
             });
         } else {
             console.error('❌ Calendar start date input not found');
+        }
+    }
+
+    /**
+     * Pre-cache employee shift types to avoid repeated calculations during render
+     * PERFORMANCE FIX: determineEmployeeShiftType is called multiple times per employee
+     */
+    cacheEmployeeShiftTypes() {
+        if (!this.workforceManager.employeeManager) return;
+        
+        const startTime = performance.now();
+        let cached = 0;
+        
+        this.workforceManager.employees.forEach(employee => {
+            if (!employee.shiftType) {
+                employee.shiftType = this.workforceManager.employeeManager.determineEmployeeShiftType(employee);
+                cached++;
+            }
+        });
+        
+        if (window.location.hostname === 'localhost' && cached > 0) {
+            console.log(`⚡ Cached ${cached} employee shift types in ${(performance.now() - startTime).toFixed(2)}ms`);
         }
     }
 

@@ -289,25 +289,14 @@ class FilterManager {
     }
 
     // Get cached filtered employees or calculate if cache is invalid
+    // PERFORMANCE FIX: Cache now works for ALL sort orders including 'original'
     getCachedFilteredEmployees() {
-        const currentFilterState = JSON.stringify({
-            shiftFilters: this.shiftFilters,
-            roleFilters: this.roleFilters,
-            sortOrder: this.sortOrder
-        });
+        // Build cache key from employee count + filter state (faster than JSON.stringify)
+        const employeeCount = this.workforceManager.employees.length;
+        const cacheKey = `${employeeCount}_${this.sortOrder}_${Object.keys(this.shiftFilters).map(k => this.shiftFilters[k] ? '1' : '0').join('')}_${Object.keys(this.roleFilters).map(k => this.roleFilters[k] ? '1' : '0').join('')}`;
 
-        // For "original" sort, always get fresh data to avoid cache corruption
-        if (this.sortOrder === 'original') {
-            console.log('🔄 Original sort - bypassing cache to get fresh data');
-            const filteredEmployees = this.workforceManager.employees.filter(employee => 
-                this.shouldShowEmployee(employee)
-            );
-            console.log('🔍 Fresh filtered employees (first 5):', filteredEmployees.slice(0, 5).map(e => e.name));
-            return this.getSortedEmployees(filteredEmployees);
-        }
-
-        // Return cached result if filter state hasn't changed
-        if (this.filteredEmployeesCache && this.lastFilterState === currentFilterState) {
+        // Return cached result if cache key hasn't changed
+        if (this.filteredEmployeesCache && this.lastFilterState === cacheKey) {
             return this.filteredEmployeesCache;
         }
 
@@ -316,12 +305,12 @@ class FilterManager {
             this.shouldShowEmployee(employee)
         );
 
-        // Sort employees
+        // Sort employees (works for all sort orders including 'original')
         const sortedEmployees = this.getSortedEmployees(filteredEmployees);
 
         // Cache the result
         this.filteredEmployeesCache = sortedEmployees;
-        this.lastFilterState = currentFilterState;
+        this.lastFilterState = cacheKey;
 
         return sortedEmployees;
     }

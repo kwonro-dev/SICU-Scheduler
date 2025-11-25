@@ -28,6 +28,14 @@ class ImportManager {
         if (!file) {
             return;
         }
+        
+        // BUG FIX: Clear ALL previous import state to prevent stale data issues
+        this.rawCsvData = null;
+        this.cleanedCsvData = null;
+        this.xlsxFileName = null;
+        this.xlsxMetadataRow = null;
+        this.xlsxImportData = null;
+        
         const progressDiv = document.getElementById('xlsxProgress');
         const progressFill = document.getElementById('xlsxProgressFill');
         const progressText = document.getElementById('xlsxProgressText');
@@ -65,14 +73,19 @@ class ImportManager {
             this.rawCsvData = csvData;
             this.xlsxFileName = file.name;
 
-            // Pre-clean to avoid duplicate work and ensure immediate processing has data
-            if (!this.cleanedCsvData) {
-                const fullCsvWithCleanedContent = this.cleanCsvNewlines(csvData);
-                const cleanedLines = fullCsvWithCleanedContent.trim().split('\n');
-                const dataLines = cleanedLines.slice(8);
-                const csvWithoutHeaders = dataLines.join('\n');
-                this.cleanedCsvData = DataProcessor.removeColumnsWithAllBlankData(csvWithoutHeaders);
-            }
+            // OPTIMIZATION: Process data ONCE here and store results
+            // This prevents duplicate processing in showCsvPreview() and processCsvImport()
+            const fullCsvWithCleanedContent = this.cleanCsvNewlines(csvData);
+            const cleanedLines = fullCsvWithCleanedContent.trim().split('\n');
+            
+            // Save the 8th row as metadata (before removing header rows)
+            const rawMetadataRow = cleanedLines[7] || '';
+            this.xlsxMetadataRow = this.processMetadataRow(rawMetadataRow);
+            
+            // Remove first 8 header rows
+            const dataLines = cleanedLines.slice(8);
+            const csvWithoutHeaders = dataLines.join('\n');
+            this.cleanedCsvData = DataProcessor.removeColumnsWithAllBlankData(csvWithoutHeaders);
 
             progressText.textContent = 'Conversion complete!';
             progressFill.style.width = '100%';
@@ -95,6 +108,7 @@ class ImportManager {
     }
 
     // Show CSV preview before import
+    // OPTIMIZED: Uses pre-processed data when available to avoid duplicate work
     showCsvPreview(csvData, fileName) {
 
         const dataPreview = document.getElementById('dataPreview');
@@ -106,34 +120,35 @@ class ImportManager {
 
         console.log('dataPreview element found:', dataPreview);
 
-        // First clean content within quotes, then save 8th row, remove first 8 rows, then remove blank columns
-        const lines = csvData.trim().split('\n');
+        // OPTIMIZATION: Use pre-processed data if available (from handleXLSXImport)
+        let fullyCleanedCsv;
+        let fullCsvWithCleanedContent;
+        let cleanedLines;
+        
+        if (this.cleanedCsvData && this.xlsxMetadataRow !== null) {
+            // Data was already processed in handleXLSXImport, reuse it
+            fullyCleanedCsv = this.cleanedCsvData;
+            fullCsvWithCleanedContent = this.cleanCsvNewlines(csvData); // Still need for stats
+            cleanedLines = fullCsvWithCleanedContent.trim().split('\n');
+        } else {
+            // Fallback: process data if not pre-processed
+            fullCsvWithCleanedContent = this.cleanCsvNewlines(csvData);
+            cleanedLines = fullCsvWithCleanedContent.trim().split('\n');
+            
+            console.log('Original CSV lines:', csvData.trim().split('\n').length);
+            console.log('Cleaned CSV lines:', cleanedLines.length);
 
-        // First clean content within quotes on the entire data (including headers)
-        const fullCsvWithCleanedContent = this.cleanCsvNewlines(csvData);
+            const rawMetadataRow = cleanedLines[7] || '';
+            this.xlsxMetadataRow = this.processMetadataRow(rawMetadataRow);
+            console.log('Processed metadata row:', this.xlsxMetadataRow);
 
-        // Now split the cleaned data and save the 8th row as metadata
-        const cleanedLines = fullCsvWithCleanedContent.trim().split('\n');
-        console.log('Original CSV lines:', csvData.trim().split('\n').length);
-        console.log('Cleaned CSV lines:', cleanedLines.length);
-        console.log('First 10 lines of cleaned CSV:');
-        cleanedLines.slice(0, 10).forEach((line, i) => console.log(`Line ${i}: ${line.substring(0, 100)}${line.length > 100 ? '...' : ''}`));
-
-        let rawMetadataRow = cleanedLines[7] || '';
-        console.log('Raw metadata row (8th row):', rawMetadataRow);
-        console.log('Metadata row exists:', !!rawMetadataRow);
-        console.log('Metadata row trimmed:', rawMetadataRow.trim());
-
-        // Process the 8th row: remove blank entries and add two blank placeholders at the front
-        this.xlsxMetadataRow = this.processMetadataRow(rawMetadataRow);
-        console.log('Processed metadata row:', this.xlsxMetadataRow);
-
-        // Remove first 8 header rows from the cleaned data
-        const dataLines = cleanedLines.slice(8); // Remove first 8 header rows
-        const csvWithoutHeaders = dataLines.join('\n');
-
-        // Now remove columns that have all blank data from the remaining data (not entire file)
-        const fullyCleanedCsv = DataProcessor.removeColumnsWithAllBlankData(csvWithoutHeaders);
+            const dataLines = cleanedLines.slice(8);
+            const csvWithoutHeaders = dataLines.join('\n');
+            fullyCleanedCsv = DataProcessor.removeColumnsWithAllBlankData(csvWithoutHeaders);
+            this.cleanedCsvData = fullyCleanedCsv;
+        }
+        
+        const dataLines = cleanedLines.slice(8);
 
         // Get statistics for display
         const originalLines = csvData.trim().split('\n');
@@ -234,6 +249,7 @@ class ImportManager {
     }
 
     // Process the CSV import after user confirms
+    // OPTIMIZED: Uses pre-processed data from handleXLSXImport when available
     processCsvImport() {
         if (!this.rawCsvData) {
             alert('No CSV data available. Please upload a file first.');
@@ -249,35 +265,26 @@ class ImportManager {
         progressFill.style.width = '20%';
 
         try {
-            // Use the cleaned CSV data (content and empty cells already cleaned)
-            let csvDataToProcess = this.cleanedCsvData || this.rawCsvData;
-
-            // Ensure it's fully cleaned (in case user bypassed preview)
+            // OPTIMIZATION: Data should already be cleaned in handleXLSXImport
+            // Only process if somehow we got here without pre-processing (edge case)
             if (!this.cleanedCsvData) {
-                // First clean content within quotes, then save 8th row, remove first 8 rows, then remove blank columns
-                const lines = csvDataToProcess.trim().split('\n');
-
-                // First clean content within quotes on the entire data (including headers)
-                const fullCsvWithCleanedContent = this.cleanCsvNewlines(csvDataToProcess);
-
-                // Now split the cleaned data and save the 8th row as metadata
+                console.warn('CSV data was not pre-processed, processing now...');
+                const fullCsvWithCleanedContent = this.cleanCsvNewlines(this.rawCsvData);
                 const cleanedLines = fullCsvWithCleanedContent.trim().split('\n');
-                let rawMetadataRow = cleanedLines[7] || '';
+                
+                // Process metadata row if not already done
+                if (!this.xlsxMetadataRow) {
+                    const rawMetadataRow = cleanedLines[7] || '';
+                    this.xlsxMetadataRow = this.processMetadataRow(rawMetadataRow);
+                }
 
-                // Process the 8th row: remove blank entries and add two blank placeholders at the front
-                this.xlsxMetadataRow = this.processMetadataRow(rawMetadataRow);
-
-                // Remove first 8 header rows from the cleaned data
-                const dataLines = cleanedLines.slice(8); // Remove first 8 header rows
+                const dataLines = cleanedLines.slice(8);
                 const csvWithoutHeaders = dataLines.join('\n');
-
-                // Now remove columns that have all blank data from the remaining data (not entire file)
-                csvDataToProcess = DataProcessor.removeColumnsWithAllBlankData(csvWithoutHeaders);
+                this.cleanedCsvData = DataProcessor.removeColumnsWithAllBlankData(csvWithoutHeaders);
             }
 
-            // Headers have been removed and blank columns removed, csvDataToProcess contains processed data
-            const filteredCsvData = csvDataToProcess;
-
+            // Use the pre-processed cleaned data
+            const filteredCsvData = this.cleanedCsvData;
 
             // Parse the filtered CSV data using XLSX-specific parsing logic
             const data = DataProcessor.parseXlsxCsv(filteredCsvData);
@@ -285,7 +292,6 @@ class ImportManager {
             // Process the schedule data for XLSX
             progressText.textContent = 'Processing XLSX schedule data...';
             progressFill.style.width = '60%';
-
 
             const processedData = DataProcessor.processXlsxScheduleData(data, generateId, this.workforceManager.currentWeekStart, this.xlsxMetadataRow, DataProcessor.parseCsvRow);
 
@@ -382,6 +388,7 @@ class ImportManager {
     }
 
     // Confirm and save XLSX import data
+    // OPTIMIZED: Uses Map/Set for O(1) lookups instead of O(n) .find() calls
     async confirmXlsxImport() {
         if (!this.xlsxImportData) {
             alert('No XLSX import data available. Please upload a file first.');
@@ -391,6 +398,21 @@ class ImportManager {
         const { employees, schedules } = this.xlsxImportData;
 
         try {
+            // OPTIMIZATION: Build lookup maps ONCE for O(1) access
+            const existingShiftTypeMap = new Map(
+                this.workforceManager.shiftTypes.map(st => [st.name, st])
+            );
+            const existingJobRoleMap = new Map(
+                this.workforceManager.jobRoles.map(jr => [jr.name, jr])
+            );
+            const existingEmployeeMap = new Map(
+                this.workforceManager.employees.map(e => [e.name, e])
+            );
+            // For schedules, create composite key: "employeeId|date|shiftType"
+            const existingScheduleSet = new Set(
+                this.workforceManager.schedules.map(s => `${s.employeeId}|${s.date}|${s.shiftType}`)
+            );
+
             // First, extract and create shift types from the schedule data
             const uniqueShiftTypes = new Set();
             schedules.forEach(schedule => {
@@ -399,11 +421,10 @@ class ImportManager {
                 }
             });
 
-            // Create shift types that don't already exist
+            // Create shift types that don't already exist - O(1) lookup now
             let newShiftTypesCount = 0;
             uniqueShiftTypes.forEach(shiftTypeName => {
-                const existingShiftType = this.workforceManager.shiftTypes.find(st => st.name === shiftTypeName);
-                if (!existingShiftType) {
+                if (!existingShiftTypeMap.has(shiftTypeName)) {
                     const newShiftType = {
                         id: generateId(),
                         name: shiftTypeName,
@@ -411,6 +432,7 @@ class ImportManager {
                         created: new Date().toISOString()
                     };
                     this.workforceManager.shiftTypes.push(newShiftType);
+                    existingShiftTypeMap.set(shiftTypeName, newShiftType); // Update map for linking step
                     newShiftTypesCount++;
                 }
             });
@@ -423,11 +445,10 @@ class ImportManager {
                 }
             });
 
-            // Create job roles that don't already exist
+            // Create job roles that don't already exist - O(1) lookup now
             let newJobRolesCount = 0;
             uniqueJobRoles.forEach(jobRoleName => {
-                const existingJobRole = this.workforceManager.jobRoles.find(jr => jr.name === jobRoleName);
-                if (!existingJobRole) {
+                if (!existingJobRoleMap.has(jobRoleName)) {
                     const newJobRole = {
                         id: generateId(),
                         name: jobRoleName,
@@ -435,112 +456,101 @@ class ImportManager {
                         created: new Date().toISOString()
                     };
                     this.workforceManager.jobRoles.push(newJobRole);
+                    existingJobRoleMap.set(jobRoleName, newJobRole); // Update map for linking step
                     newJobRolesCount++;
                 }
             });
 
-            // Link schedules to shift type IDs
+            // Link schedules to shift type IDs - O(1) lookup now
+            // OPTIMIZATION: Avoid multiple .trim() calls, collect warnings
+            let shiftTypeMisses = 0;
             schedules.forEach(schedule => {
-                if (schedule.shiftType && schedule.shiftType.trim()) {
-                    const shiftType = this.workforceManager.shiftTypes.find(st => st.name === schedule.shiftType.trim());
+                const shiftTypeName = schedule.shiftType?.trim();
+                if (shiftTypeName) {
+                    const shiftType = existingShiftTypeMap.get(shiftTypeName);
                     if (shiftType) {
                         schedule.shiftId = shiftType.id;
-                        // Keep the shiftType name for backward compatibility
                     } else {
-                        console.warn(`Could not find shift type for schedule: ${schedule.shiftType}`);
+                        shiftTypeMisses++;
                     }
                 }
             });
+            if (shiftTypeMisses > 0) {
+                console.warn(`Could not find shift type for ${shiftTypeMisses} schedules`);
+            }
 
-            // Link employees to job role IDs
+            // Link employees to job role IDs - O(1) lookup now
+            let jobRoleMisses = 0;
             employees.forEach(employee => {
-                if (employee.role && employee.role.trim()) {
-                    const jobRole = this.workforceManager.jobRoles.find(jr => jr.name === employee.role.trim());
+                const roleName = employee.role?.trim();
+                if (roleName) {
+                    const jobRole = existingJobRoleMap.get(roleName);
                     if (jobRole) {
                         employee.roleId = jobRole.id;
-                        // Keep the role name for backward compatibility
                     } else {
-                        console.warn(`Could not find job role for employee: ${employee.role}`);
+                        jobRoleMisses++;
                     }
                 }
             });
+            if (jobRoleMisses > 0) {
+                console.warn(`Could not find job role for ${jobRoleMisses} employees`);
+            }
 
-            // Now add the employees and schedules (with duplicate prevention)
+            // Now add the employees and schedules (with duplicate prevention) - O(1) lookup now
             let newEmployeesCount = 0;
+            let skippedEmployees = 0;
             employees.forEach(employee => {
-                // Check if employee already exists (by name)
-                const existingEmployee = this.workforceManager.employees.find(e => e.name === employee.name);
+                const existingEmployee = existingEmployeeMap.get(employee.name);
                 if (!existingEmployee) {
                     this.workforceManager.employees.push(employee);
+                    existingEmployeeMap.set(employee.name, employee); // Track for future lookups
                     newEmployeesCount++;
                 } else {
-                    console.log(`⏭️ Skipping duplicate employee: ${employee.name}`);
-                    // Update existing employee with new data if needed
+                    skippedEmployees++;
                     Object.assign(existingEmployee, employee);
                 }
             });
+            // Log summary instead of per-item (avoids 1000s of console.log calls)
+            if (skippedEmployees > 0) {
+                console.log(`⏭️ Skipped ${skippedEmployees} duplicate employees`);
+            }
 
-            // Add schedules (with duplicate prevention)
+            // Add schedules (with duplicate prevention) - O(1) lookup now
             let newSchedulesCount = 0;
+            let skippedSchedules = 0;
             schedules.forEach(schedule => {
-                // Check for duplicate schedule: same employee, same date, same shift type
-                const existingSchedule = this.workforceManager.schedules.find(s => 
-                    s.employeeId === schedule.employeeId && 
-                    s.date === schedule.date && 
-                    s.shiftType === schedule.shiftType
-                );
-                
-                if (!existingSchedule) {
+                const scheduleKey = `${schedule.employeeId}|${schedule.date}|${schedule.shiftType}`;
+                if (!existingScheduleSet.has(scheduleKey)) {
                     this.workforceManager.schedules.push(schedule);
+                    existingScheduleSet.add(scheduleKey); // Track for future lookups
                     newSchedulesCount++;
                 } else {
-                    console.log(`⏭️ Skipping duplicate schedule: ${schedule.employeeId} on ${schedule.date} for ${schedule.shiftType}`);
+                    skippedSchedules++;
                 }
             });
+            // Log summary instead of per-item
+            if (skippedSchedules > 0) {
+                console.log(`⏭️ Skipped ${skippedSchedules} duplicate schedules`);
+            }
 
-            // Show progress indicator
-            const progressDiv = document.createElement('div');
-            progressDiv.id = 'importProgress';
-            progressDiv.style.cssText = `
-                position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-                background: #333; color: white; padding: 20px; border-radius: 8px;
-                z-index: 10000; font-family: Arial, sans-serif; text-align: center;
-            `;
-            progressDiv.innerHTML = `
-                <div style="margin-bottom: 10px;">📊 Importing data...</div>
-                <div style="font-size: 12px; color: #ccc;">This may take a few seconds</div>
-            `;
-            document.body.appendChild(progressDiv);
-
+            // OPTIMISTIC UI: Show calendar immediately, sync to Firebase in background
+            // This makes the import feel instant!
+            
             // Set flag to prevent real-time listener conflicts during bulk import
             this.workforceManager.isResetting = true;
-
-            // Save all data (bulk mode to minimize real-time conflicts)
-            await this.workforceManager.dataManager.saveData('shiftTypes', this.workforceManager.shiftTypes, true);
-            await this.workforceManager.dataManager.saveData('jobRoles', this.workforceManager.jobRoles, true);
-            await this.workforceManager.dataManager.saveData('employees', this.workforceManager.employees, true);
-            await this.workforceManager.dataManager.saveData('schedules', this.workforceManager.schedules, true);
-
-            // Update role badge styles for new job roles
+            
+            // Update role badge styles for new job roles (fast, local operation)
             this.workforceManager.updateRoleBadgeStyles();
-
-            // Show import summary
-            console.log('📊 XLSX Import Summary:', {
-                newEmployees: newEmployeesCount,
-                newSchedules: newSchedulesCount
-            });
 
             // Set calendar start date to the first (earliest) imported date
             if (schedules.length > 0) {
                 const importedDates = schedules.map(s => s.date).filter(Boolean);
                 if (importedDates.length > 0) {
-                    const firstDate = importedDates.reduce((min, d) => (new Date(d) < new Date(min) ? d : min), importedDates[0]);
-                    // Create date at local midnight to avoid timezone issues
+                    const firstDate = importedDates.reduce((min, d) => d < min ? d : min, importedDates[0]);
                     const [year, month, day] = firstDate.split('-').map(Number);
                     this.workforceManager.currentWeekStart = new Date(year, month - 1, day);
                     localStorage.setItem('calendarStartDate', firstDate);
                     
-                    // Update the calendar start date input field
                     const startDateInput = document.getElementById('calendarStartDate');
                     if (startDateInput) {
                         startDateInput.value = firstDate;
@@ -548,50 +558,61 @@ class ImportManager {
                 }
             }
 
-            // Wait for operations to complete
-            await new Promise(resolve => setTimeout(resolve, 200));
+            // Clear import data early to free memory
+            this.xlsxImportData = null;
+            this.xlsxMetadataRow = null;
 
-            // Clear the resetting flag
-            this.workforceManager.isResetting = false;
-
-            // Remove progress indicator
-            const progressEl = document.getElementById('importProgress');
-            if (progressEl) progressEl.remove();
-
-            // Count how many shift types were created during this import
-            const finalShiftTypesCount = this.workforceManager.shiftTypes.length;
-
-            alert(`XLSX import completed successfully!\n\nImported:\n• ${employees.length} employees\n• ${newJobRolesCount} job roles\n• ${newShiftTypesCount} shift types\n• ${schedules.length} shift assignments`);
-
-            // Switch to calendar view to show imported data
+            // Switch to calendar view IMMEDIATELY (optimistic UI)
             this.workforceManager.switchView('calendar');
             
-            // Force refresh the calendar view to show the new start date
-            this.workforceManager.calendarRenderer.renderScheduleMatrix();
-            
-            // Re-initialize filters after calendar refresh
+            // Re-initialize filters
             this.workforceManager.filterManager.initializeCalendarFilters();
             this.workforceManager.filterManager.createRoleFilterButtons();
 
-            // Save a snapshot immediately after import so change tracking works properly
-            try {
-                if (!this.workforceManager.snapshotManager && typeof SnapshotManager !== 'undefined') {
-                    this.workforceManager.snapshotManager = new SnapshotManager(this.workforceManager);
-                }
-                if (this.workforceManager.snapshotManager) {
-                    this.workforceManager.snapshotManager.saveSnapshot();
-                    console.log('Snapshot saved after XLSX import');
-                    if (this.workforceManager.updateSnapshotUI) {
-                        this.workforceManager.updateSnapshotUI();
-                    }
-                }
-            } catch (e) {
-                console.warn('Failed to save snapshot after import:', e);
-            }
+            // Show non-blocking toast notification
+            this.showImportToast(`Imported ${employees.length} employees, ${schedules.length} shifts. Syncing to cloud...`, 'info');
 
-            // Clear the import data
-            this.xlsxImportData = null;
-            this.xlsxMetadataRow = null;
+            // BACKGROUND SYNC: Save to Firebase without blocking the UI
+            const syncStartTime = performance.now();
+            console.log('📊 Starting background Firebase sync...');
+            
+            // Store references for the async closure
+            const employeesCount = employees.length;
+            const schedulesCount = schedules.length;
+            const shiftTypesCount = newShiftTypesCount;
+            const jobRolesCount = newJobRolesCount;
+            
+            // Run Firebase sync in background (non-blocking)
+            Promise.all([
+                this.workforceManager.dataManager.saveData('shiftTypes', this.workforceManager.shiftTypes, true),
+                this.workforceManager.dataManager.saveData('jobRoles', this.workforceManager.jobRoles, true),
+                this.workforceManager.dataManager.saveData('employees', this.workforceManager.employees, true),
+                this.workforceManager.dataManager.saveData('schedules', this.workforceManager.schedules, true)
+            ]).then(() => {
+                const syncTime = performance.now() - syncStartTime;
+                console.log(`✅ Background Firebase sync completed in ${syncTime.toFixed(0)}ms`);
+                this.workforceManager.isResetting = false;
+                this.showImportToast(`✅ Sync complete! ${employeesCount} employees, ${schedulesCount} shifts saved.`, 'success');
+                
+                // Save snapshot after successful sync
+                try {
+                    if (!this.workforceManager.snapshotManager && typeof SnapshotManager !== 'undefined') {
+                        this.workforceManager.snapshotManager = new SnapshotManager(this.workforceManager);
+                    }
+                    if (this.workforceManager.snapshotManager) {
+                        this.workforceManager.snapshotManager.saveSnapshot();
+                        if (this.workforceManager.updateSnapshotUI) {
+                            this.workforceManager.updateSnapshotUI();
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Failed to save snapshot after import:', e);
+                }
+            }).catch(error => {
+                console.error('❌ Background Firebase sync failed:', error);
+                this.workforceManager.isResetting = false;
+                this.showImportToast('⚠️ Cloud sync failed. Data saved locally.', 'error');
+            });
 
         } catch (error) {
             console.error('XLSX import confirmation error:', error);
@@ -653,11 +674,16 @@ class ImportManager {
     }
 
     // Helper function to remove newlines, carriage returns, and spaces within quotes
+    // OPTIMIZED: Uses array.join() instead of string concatenation for O(n) performance
     cleanCsvNewlines(csvText) {
         console.log('cleanCsvNewlines called with text length:', csvText.length);
-        let result = '';
+        
+        // OPTIMIZATION: Use array and join instead of string concatenation
+        // String += is O(n²) due to immutable strings, array.join is O(n)
+        const resultChunks = [];
         let inQuotes = false;
         let i = 0;
+        let chunkStart = 0;
 
         while (i < csvText.length) {
             const char = csvText[i];
@@ -665,26 +691,33 @@ class ImportManager {
 
             if (char === '"') {
                 if (inQuotes && nextChar === '"') {
-                    // Escaped quote within quoted field
-                    result += '""';
-                    i += 2; // Skip both quotes
+                    // Escaped quote within quoted field - keep both
+                    i += 2;
                     continue;
                 } else {
                     // Toggle quote state
                     inQuotes = !inQuotes;
-                    result += char;
+                    i++;
                 }
             } else if ((char === '\n' || char === '\r' || char === ' ') && inQuotes) {
                 // Skip newlines, carriage returns, and spaces within quotes
-                // Don't add anything to result - completely remove them
-                // This will concatenate words together
+                // Save chunk before this character
+                if (i > chunkStart) {
+                    resultChunks.push(csvText.substring(chunkStart, i));
+                }
+                chunkStart = i + 1;
+                i++;
             } else {
-                result += char;
+                i++;
             }
-
-            i++;
         }
 
+        // Add final chunk
+        if (chunkStart < csvText.length) {
+            resultChunks.push(csvText.substring(chunkStart));
+        }
+
+        const result = resultChunks.join('');
         console.log('cleanCsvNewlines returning result length:', result.length);
         return result;
     }
@@ -706,6 +739,66 @@ class ImportManager {
         return div.innerHTML;
     }
 
+    // Show a non-blocking toast notification for import status
+    showImportToast(message, type = 'info') {
+        // Remove any existing toast
+        const existingToast = document.getElementById('importToast');
+        if (existingToast) existingToast.remove();
+
+        const toast = document.createElement('div');
+        toast.id = 'importToast';
+        
+        const bgColor = type === 'success' ? '#10b981' : type === 'error' ? '#ef4444' : '#3b82f6';
+        const icon = type === 'success' ? '✅' : type === 'error' ? '⚠️' : '📊';
+        
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: ${bgColor};
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 10000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            animation: slideIn 0.3s ease-out;
+            max-width: 400px;
+        `;
+        
+        toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+        
+        // Add animation keyframes if not already added
+        if (!document.getElementById('toastAnimationStyles')) {
+            const style = document.createElement('style');
+            style.id = 'toastAnimationStyles';
+            style.textContent = `
+                @keyframes slideIn {
+                    from { transform: translateX(100%); opacity: 0; }
+                    to { transform: translateX(0); opacity: 1; }
+                }
+                @keyframes slideOut {
+                    from { transform: translateX(0); opacity: 1; }
+                    to { transform: translateX(100%); opacity: 0; }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        document.body.appendChild(toast);
+        
+        // Auto-remove after delay (longer for success, shorter for info)
+        const delay = type === 'success' ? 4000 : type === 'error' ? 6000 : 3000;
+        setTimeout(() => {
+            toast.style.animation = 'slideOut 0.3s ease-in forwards';
+            setTimeout(() => toast.remove(), 300);
+        }, delay);
+    }
+
     // Utility function to get random color for shift types
     getRandomColor() {
         const colors = [
@@ -717,6 +810,7 @@ class ImportManager {
 
 
     // Confirm general import
+    // OPTIMIZED: Uses Map/Set for O(1) lookups and parallel Firebase saves
     async confirmImport() {
         if (!this.importData) {
             alert('No import data available. Please upload a file first.');
@@ -726,15 +820,28 @@ class ImportManager {
         const { employees, shiftTypes, schedules, headers } = this.importData;
 
         try {
-            // Add shift types with proper colors
+            // OPTIMIZATION: Build lookup maps ONCE for O(1) access
+            const existingShiftTypeMap = new Map(
+                this.workforceManager.shiftTypes.map(st => [st.name, st])
+            );
+            const existingJobRoleMap = new Map(
+                this.workforceManager.jobRoles.map(jr => [jr.name, jr])
+            );
+            const existingEmployeeMap = new Map(
+                this.workforceManager.employees.map(e => [e.name, e])
+            );
+            const existingScheduleSet = new Set(
+                this.workforceManager.schedules.map(s => `${s.employeeId}|${s.date}|${s.shiftType}`)
+            );
+
+            // Add shift types with proper colors - O(1) lookup now
             shiftTypes.forEach(shiftType => {
-                const existingShiftType = this.workforceManager.shiftTypes.find(st => st.name === shiftType.name);
-                if (!existingShiftType) {
-                    // Ensure shift type has proper color
+                if (!existingShiftTypeMap.has(shiftType.name)) {
                     if (!shiftType.color) {
                         shiftType.color = ScheduleUtils.getDefaultShiftColor(shiftType.name);
                     }
                     this.workforceManager.shiftTypes.push(shiftType);
+                    existingShiftTypeMap.set(shiftType.name, shiftType);
                 }
             });
 
@@ -746,11 +853,10 @@ class ImportManager {
                 }
             });
 
-            // Create job roles that don't already exist
+            // Create job roles that don't already exist - O(1) lookup now
             let newJobRolesCount = 0;
             uniqueJobRoles.forEach(jobRoleName => {
-                const existingJobRole = this.workforceManager.jobRoles.find(jr => jr.name === jobRoleName);
-                if (!existingJobRole) {
+                if (!existingJobRoleMap.has(jobRoleName)) {
                     const newJobRole = {
                         id: generateId(),
                         name: jobRoleName,
@@ -758,74 +864,88 @@ class ImportManager {
                         created: new Date().toISOString()
                     };
                     this.workforceManager.jobRoles.push(newJobRole);
+                    existingJobRoleMap.set(jobRoleName, newJobRole);
                     newJobRolesCount++;
                 }
             });
 
-            // Link schedules to shift type IDs
+            // Link schedules to shift type IDs - O(1) lookup now
+            let shiftMisses = 0;
             schedules.forEach(schedule => {
-                if (schedule.shiftType && schedule.shiftType.trim()) {
-                    const shiftType = this.workforceManager.shiftTypes.find(st => st.name === schedule.shiftType.trim());
+                const shiftName = schedule.shiftType?.trim();
+                if (shiftName) {
+                    const shiftType = existingShiftTypeMap.get(shiftName);
                     if (shiftType) {
                         schedule.shiftId = shiftType.id;
-                        // Keep the shiftType name for backward compatibility
                     } else {
-                        console.warn(`Could not find shift type for schedule: ${schedule.shiftType}`);
+                        shiftMisses++;
                     }
                 }
             });
+            if (shiftMisses > 0) {
+                console.warn(`Could not find shift type for ${shiftMisses} schedules`);
+            }
 
-            // Link employees to job role IDs
+            // Link employees to job role IDs - O(1) lookup now
+            let roleMisses = 0;
             employees.forEach(employee => {
-                if (employee.role && employee.role.trim()) {
-                    const jobRole = this.workforceManager.jobRoles.find(jr => jr.name === employee.role.trim());
+                const roleName = employee.role?.trim();
+                if (roleName) {
+                    const jobRole = existingJobRoleMap.get(roleName);
                     if (jobRole) {
                         employee.roleId = jobRole.id;
-                        // Keep the role name for backward compatibility
                     } else {
-                        console.warn(`Could not find job role for employee: ${employee.role}`);
+                        roleMisses++;
                     }
                 }
             });
+            if (roleMisses > 0) {
+                console.warn(`Could not find job role for ${roleMisses} employees`);
+            }
 
-            // Add employees (with duplicate prevention)
+            // Add employees (with duplicate prevention) - O(1) lookup now
             let newEmployeesCount = 0;
+            let skippedEmployeesCount = 0;
             employees.forEach(employee => {
-                const existingEmployee = this.workforceManager.employees.find(e => e.name === employee.name);
-                if (!existingEmployee) {
+                if (!existingEmployeeMap.has(employee.name)) {
                     this.workforceManager.employees.push(employee);
+                    existingEmployeeMap.set(employee.name, employee);
                     newEmployeesCount++;
                 } else {
-                    console.log(`⏭️ Skipping duplicate employee: ${employee.name}`);
+                    skippedEmployeesCount++;
                 }
             });
+            if (skippedEmployeesCount > 0) {
+                console.log(`⏭️ Skipped ${skippedEmployeesCount} duplicate employees`);
+            }
 
-            // Add schedules (with duplicate prevention)
+            // Add schedules (with duplicate prevention) - O(1) lookup now
             let newSchedulesCount = 0;
+            let skippedSchedulesCount = 0;
             schedules.forEach(schedule => {
-                // Check for duplicate schedule: same employee, same date, same shift type
-                const existingSchedule = this.workforceManager.schedules.find(s => 
-                    s.employeeId === schedule.employeeId && 
-                    s.date === schedule.date && 
-                    s.shiftType === schedule.shiftType
-                );
-                
-                if (!existingSchedule) {
+                const scheduleKey = `${schedule.employeeId}|${schedule.date}|${schedule.shiftType}`;
+                if (!existingScheduleSet.has(scheduleKey)) {
                     this.workforceManager.schedules.push(schedule);
+                    existingScheduleSet.add(scheduleKey);
                     newSchedulesCount++;
                 } else {
-                    console.log(`⏭️ Skipping duplicate schedule: ${schedule.employeeId} on ${schedule.date} for ${schedule.shiftType}`);
+                    skippedSchedulesCount++;
                 }
             });
+            if (skippedSchedulesCount > 0) {
+                console.log(`⏭️ Skipped ${skippedSchedulesCount} duplicate schedules`);
+            }
 
             // Set flag to prevent real-time listener conflicts during bulk import
             this.workforceManager.isResetting = true;
 
-            // Save all data (bulk mode to minimize real-time conflicts)
-            await this.workforceManager.dataManager.saveData('jobRoles', this.workforceManager.jobRoles, true);
-            await this.workforceManager.dataManager.saveData('shiftTypes', this.workforceManager.shiftTypes, true);
-            await this.workforceManager.dataManager.saveData('employees', this.workforceManager.employees, true);
-            await this.workforceManager.dataManager.saveData('schedules', this.workforceManager.schedules, true);
+            // OPTIMIZATION: Save all data in PARALLEL (bulk mode to minimize real-time conflicts)
+            await Promise.all([
+                this.workforceManager.dataManager.saveData('jobRoles', this.workforceManager.jobRoles, true),
+                this.workforceManager.dataManager.saveData('shiftTypes', this.workforceManager.shiftTypes, true),
+                this.workforceManager.dataManager.saveData('employees', this.workforceManager.employees, true),
+                this.workforceManager.dataManager.saveData('schedules', this.workforceManager.schedules, true)
+            ]);
 
             // Wait for operations to complete
             await new Promise(resolve => setTimeout(resolve, 200));
@@ -845,16 +965,16 @@ class ImportManager {
             });
 
             // Set calendar start date to the first (earliest) imported date
+            // OPTIMIZATION: Use string comparison instead of creating Date objects
             if (schedules.length > 0) {
                 const importedDates = schedules.map(s => s.date).filter(Boolean);
                 if (importedDates.length > 0) {
-                    const firstDate = importedDates.reduce((min, d) => (new Date(d) < new Date(min) ? d : min), importedDates[0]);
-                    // Create date at local midnight to avoid timezone issues
+                    // String comparison works for YYYY-MM-DD format
+                    const firstDate = importedDates.reduce((min, d) => d < min ? d : min, importedDates[0]);
                     const [year, month, day] = firstDate.split('-').map(Number);
                     this.workforceManager.currentWeekStart = new Date(year, month - 1, day);
                     localStorage.setItem('calendarStartDate', firstDate);
                     
-                    // Update the calendar start date input field
                     const startDateInput = document.getElementById('calendarStartDate');
                     if (startDateInput) {
                         startDateInput.value = firstDate;
@@ -862,52 +982,58 @@ class ImportManager {
                 }
             }
 
-            alert(`Import completed successfully!\n\nImported:\n• ${employees.length} employees\n• ${newJobRolesCount} job roles\n• ${shiftTypes.length} shift types\n• ${schedules.length} shift assignments`);
+            // Clear the import data early to free memory
+            this.importData = null;
 
-            // Switch to calendar view
+            // Switch to calendar view (this renders the calendar)
             this.workforceManager.switchView('calendar');
             
-            // Refresh the calendar view to show the new start date
-            this.workforceManager.calendarRenderer.renderScheduleMatrix();
+            // OPTIMIZATION: Removed duplicate renderScheduleMatrix() - switchView already does this
             
             // Re-initialize filters after calendar refresh
             this.workforceManager.filterManager.initializeCalendarFilters();
             this.workforceManager.filterManager.createRoleFilterButtons();
 
-            // Save a snapshot immediately after import so change tracking works properly
-            try {
-                if (!this.workforceManager.snapshotManager && typeof SnapshotManager !== 'undefined') {
-                    this.workforceManager.snapshotManager = new SnapshotManager(this.workforceManager);
-                }
-                if (this.workforceManager.snapshotManager) {
-                    this.workforceManager.snapshotManager.saveSnapshot();
-                    console.log('Snapshot saved after CSV import');
-                    if (this.workforceManager.updateSnapshotUI) {
-                        this.workforceManager.updateSnapshotUI();
+            // OPTIMIZATION: Defer snapshot save and activity logging to not block UI
+            setTimeout(async () => {
+                try {
+                    if (!this.workforceManager.snapshotManager && typeof SnapshotManager !== 'undefined') {
+                        this.workforceManager.snapshotManager = new SnapshotManager(this.workforceManager);
                     }
-                }
-            } catch (e) {
-                console.warn('Failed to save snapshot after import:', e);
-            }
-
-            // Log import activity
-            await this.workforceManager.activityManager.ensureActivityLogger();
-            if (this.workforceManager.activityManager.activityLogger) {
-                await this.workforceManager.activityManager.activityLogger.logActivity(
-                    'import_data',
-                    'system',
-                    'import_' + Date.now(),
-                    { 
-                        recordCount: employees.length + schedules.length,
-                        employeeCount: employees.length,
-                        scheduleCount: schedules.length,
-                        shiftTypeCount: shiftTypes.length
+                    if (this.workforceManager.snapshotManager) {
+                        this.workforceManager.snapshotManager.saveSnapshot();
+                        console.log('Snapshot saved after CSV import');
+                        if (this.workforceManager.updateSnapshotUI) {
+                            this.workforceManager.updateSnapshotUI();
+                        }
                     }
-                );
-            }
+                } catch (e) {
+                    console.warn('Failed to save snapshot after import:', e);
+                }
+                
+                // Log import activity (deferred)
+                try {
+                    await this.workforceManager.activityManager.ensureActivityLogger();
+                    if (this.workforceManager.activityManager.activityLogger) {
+                        await this.workforceManager.activityManager.activityLogger.logActivity(
+                            'import_data',
+                            'system',
+                            'import_' + Date.now(),
+                            { 
+                                recordCount: employees.length + schedules.length,
+                                employeeCount: employees.length,
+                                scheduleCount: schedules.length,
+                                shiftTypeCount: shiftTypes.length
+                            }
+                        );
+                    }
+                } catch (e) {
+                    console.warn('Failed to log import activity:', e);
+                }
+            }, 100);
 
-            // Clear the import data
-            this.importData = null;
+            // Show success message after rendering
+            alert(`Import completed successfully!\n\nImported:\n• ${employees.length} employees\n• ${newJobRolesCount} job roles\n• ${shiftTypes.length} shift types\n• ${schedules.length} shift assignments`);
 
         } catch (error) {
             console.error('Import confirmation error:', error);

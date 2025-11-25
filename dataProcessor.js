@@ -399,6 +399,7 @@ function processScheduleData(data, generateId, currentWeekStart) {
 
 /**
  * Process XLSX schedule data
+ * OPTIMIZED: Pre-calculate dates for each column ONCE instead of per-cell
  * @param {Array<Array<string>>} data - XLSX data rows
  * @param {Function} generateId - Function to generate unique IDs
  * @param {Date} currentWeekStart - Base date for date calculations
@@ -425,6 +426,33 @@ function processXlsxScheduleData(data, generateId, currentWeekStart, xlsxMetadat
         columnHeaders = parseCsvRow(xlsxMetadataRow);
     }
 
+    // OPTIMIZATION: Pre-calculate the date for each column index ONCE
+    // This avoids calling parseDayColumn() for every cell (was O(rows × cols), now O(cols))
+    const columnDateCache = new Map();
+    const maxColumns = data.reduce((max, row) => Math.max(max, row.length), 0);
+    
+    for (let shiftIndex = 0; shiftIndex < maxColumns - 2; shiftIndex++) {
+        let actualDate = null;
+        
+        // Try to use actual column header from 8th row first
+        if (columnHeaders.length > shiftIndex + 2) {
+            const columnHeader = columnHeaders[shiftIndex + 2]?.trim();
+            if (columnHeader) {
+                actualDate = parseDayColumn(columnHeader, currentWeekStart);
+            }
+        }
+        
+        // Fallback to generic "Day X" format if column header parsing fails
+        if (!actualDate) {
+            const dayHeader = `Day ${shiftIndex + 1}`;
+            actualDate = parseDayColumn(dayHeader, currentWeekStart);
+        }
+        
+        if (actualDate) {
+            columnDateCache.set(shiftIndex, actualDate);
+        }
+    }
+
     // Process each row of XLSX data
     data.forEach((row, index) => {
         if (row.length >= 3) { // Need at least Name, Job, and some shift data
@@ -446,26 +474,10 @@ function processXlsxScheduleData(data, generateId, currentWeekStart, xlsxMetadat
                 employees.push(employee);
 
                 // Process shift assignments for each date column
+                // OPTIMIZED: Use pre-calculated dates from cache
                 shiftData.forEach((shift, shiftIndex) => {
                     if (shift && shift.trim()) {
-                        let actualDate = null;
-                        let dateSource = '';
-
-                        // Try to use actual column header from 8th row first
-                        if (columnHeaders.length > shiftIndex + 2) { // +2 because we skip name and job columns
-                            const columnHeader = columnHeaders[shiftIndex + 2]?.trim();
-                            if (columnHeader) {
-                                actualDate = parseDayColumn(columnHeader, currentWeekStart);
-                                dateSource = columnHeader;
-                            }
-                        }
-
-                        // Fallback to generic "Day X" format if column header parsing fails
-                        if (!actualDate) {
-                            const dayHeader = `Day ${shiftIndex + 1}`;
-                            actualDate = parseDayColumn(dayHeader, currentWeekStart);
-                            dateSource = dayHeader;
-                        }
+                        const actualDate = columnDateCache.get(shiftIndex);
 
                         if (actualDate) {
                             const scheduleEntry = {
@@ -475,8 +487,6 @@ function processXlsxScheduleData(data, generateId, currentWeekStart, xlsxMetadat
                                 date: actualDate
                             };
                             schedules.push(scheduleEntry);
-                        } else {
-                            console.warn(`Could not parse date for column ${shiftIndex + 2} in XLSX import`);
                         }
                     }
                 });
@@ -591,6 +601,7 @@ function parseXlsxCsv(csvText) {
 
 /**
  * Remove columns that have all blank data from CSV text
+ * OPTIMIZED: Parse each row only ONCE, then analyze columns from parsed data
  * @param {string} csvText - CSV text to process
  * @returns {string} CSV text with blank columns removed
  */
@@ -601,50 +612,56 @@ function removeColumnsWithAllBlankData(csvText) {
         return '';
     }
 
-    // Step 1: Save and remove the first row
-    const firstRow = lines[0];
-    const firstRowCells = parseCsvRow(firstRow);
-    const dataRows = lines.slice(1);
-
-    if (dataRows.length === 0) {
-        return csvText;
+    // OPTIMIZATION: Parse ALL rows ONCE upfront instead of repeatedly per column
+    const parsedRows = lines.map(line => parseCsvRow(line));
+    
+    if (parsedRows.length === 0) {
+        return '';
     }
 
-    // Step 2: Analyze each column to see if it has all blank data
-    const columnCount = firstRowCells.length;
-    const columnsToKeep = [];
+    const columnCount = parsedRows[0].length;
+    
+    if (parsedRows.length === 1) {
+        return csvText; // Only header row, nothing to filter
+    }
 
-
-    for (let colIndex = 0; colIndex < columnCount; colIndex++) {
-        let hasNonBlankData = false;
-
-        // Check if first row cell has data
-        if (firstRowCells[colIndex] && firstRowCells[colIndex].trim() !== '') {
-            hasNonBlankData = true;
-        } else {
-            // Check all data rows for this column
-            for (const row of dataRows) {
-                const cells = parseCsvRow(row);
-                if (cells[colIndex] && cells[colIndex].trim() !== '') {
-                    hasNonBlankData = true;
-                    break;
-                }
+    // OPTIMIZATION: Track non-blank columns in a single pass through all data
+    const hasDataInColumn = new Array(columnCount).fill(false);
+    
+    // Single pass through all parsed rows to find non-blank columns
+    for (let rowIndex = 0; rowIndex < parsedRows.length; rowIndex++) {
+        const cells = parsedRows[rowIndex];
+        for (let colIndex = 0; colIndex < columnCount; colIndex++) {
+            if (!hasDataInColumn[colIndex] && cells[colIndex] && cells[colIndex].trim() !== '') {
+                hasDataInColumn[colIndex] = true;
             }
         }
+        
+        // Early exit if all columns have data (no columns to remove)
+        if (hasDataInColumn.every(Boolean)) {
+            return csvText;
+        }
+    }
 
-        if (hasNonBlankData) {
-            columnsToKeep.push(colIndex);
+    // Build list of columns to keep
+    const columnsToKeep = [];
+    for (let i = 0; i < columnCount; i++) {
+        if (hasDataInColumn[i]) {
+            columnsToKeep.push(i);
         }
     }
 
     if (columnsToKeep.length === 0) {
         return '';
     }
+    
+    // If no columns were removed, return original
+    if (columnsToKeep.length === columnCount) {
+        return csvText;
+    }
 
-    // Step 3: Remove blank columns from ALL rows
-    const cleanedLines = lines.map((line, lineIndex) => {
-        const cells = parseCsvRow(line);
-
+    // OPTIMIZATION: Use already-parsed data instead of re-parsing
+    const cleanedLines = parsedRows.map(cells => {
         // Keep only non-blank columns
         const filteredCells = columnsToKeep.map(index => cells[index] || '');
 
@@ -658,9 +675,7 @@ function removeColumnsWithAllBlankData(csvText) {
         }).join(',');
     });
 
-    const result = cleanedLines.join('\n');
-
-    return result;
+    return cleanedLines.join('\n');
 }
 
 // Export functions for use in other modules

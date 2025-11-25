@@ -219,6 +219,35 @@ class WorkforceScheduleManager {
         await this.initializationManager.initializeFirebase();
     }
 
+    /**
+     * Invalidate all performance caches when data changes
+     * PERFORMANCE: Called automatically by CRUD operations
+     * @param {string} dataType - 'employees', 'shiftTypes', 'jobRoles', 'schedules', or 'all'
+     */
+    invalidateCaches(dataType = 'all') {
+        // Always invalidate filter cache when any data changes
+        if (this.filterManager) {
+            this.filterManager.filteredEmployeesCache = null;
+            this.filterManager.roleFilterCache.clear();
+        }
+        
+        // Always invalidate calendar cache
+        if (this.calendarRenderer) {
+            this.calendarRenderer.matrixHTMLCache = null;
+            this.calendarRenderer.lastMatrixState = null;
+        }
+        
+        // Invalidate employee manager caches based on data type
+        if (this.employeeManager) {
+            if (dataType === 'all' || dataType === 'jobRoles') {
+                this.employeeManager.clearRoleBadgeCache();
+            }
+            if (dataType === 'all' || dataType === 'shiftTypes' || dataType === 'schedules') {
+                this.employeeManager.clearShiftTypeCache();
+            }
+        }
+    }
+
 
 
 
@@ -656,25 +685,15 @@ class WorkforceScheduleManager {
     }
 
     // Render the current view
+    // OPTIMIZED: Removed redundant updateRoleBadgeStyles (called once during init)
     renderCurrentView() {
         const renderStartTime = performance.now();
         const activeTab = document.querySelector('.nav-tab.active');
         const view = activeTab ? activeTab.id.replace('Tab', '') : 'unknown';
 
-        console.log('🎨 renderCurrentView called', {
-            view: view,
-            user: this.authManager?.user?.email,
-            isAdmin: this.authManager?.adminEmails?.has(this.authManager?.user?.email?.toLowerCase()),
-            activeTab: activeTab?.id
-        });
-
         switch (view) {
             case 'calendar':
-                // Ensure role badge styles are up to date before rendering calendar
-                this.updateRoleBadgeStyles();
                 this.calendarRenderer.renderScheduleMatrix(); 
-                const calendarTime = performance.now() - renderStartTime;
-                console.log(`📅 Calendar rendered in ${calendarTime.toFixed(2)}ms`);
                 break;
             case 'rules': this.renderRulesView(); break;
             case 'users': this.employeeManager.renderUsersView(); break;
@@ -684,8 +703,10 @@ class WorkforceScheduleManager {
             case 'activity': this.activityManager.renderActivityView(); break;
         }
         
-        const totalRenderTime = performance.now() - renderStartTime;
-        console.log(`🎨 View '${view}' rendered in ${totalRenderTime.toFixed(2)}ms`);
+        if (window.location.hostname === 'localhost') {
+            const totalRenderTime = performance.now() - renderStartTime;
+            console.log(`🎨 View '${view}' rendered in ${totalRenderTime.toFixed(2)}ms`);
+        }
     }
 
     // Toggle PMS Guide panel
@@ -778,155 +799,173 @@ class WorkforceScheduleManager {
     }
 
     // Reset all data
+    // OPTIMIZED: Optimistic UI - clear local data instantly, sync Firebase in background
     async resetAllData() {
         if (await showConfirm('Are you sure you want to reset ALL data? This will delete all employees, shifts, schedules, and job roles.', 'Reset All Data')) {
             try {
                 console.log('🧹 Starting complete data reset...');
                 
-                // Show progress indicator
-                const progressDiv = document.createElement('div');
-                progressDiv.id = 'resetProgress';
-                progressDiv.style.cssText = `
-                    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-                    background: #333; color: white; padding: 20px; border-radius: 8px;
-                    z-index: 10000; font-family: Arial, sans-serif; text-align: center;
-                `;
-                progressDiv.innerHTML = `
-                    <div style="margin-bottom: 10px;">🧹 Resetting all data...</div>
-                    <div style="font-size: 12px; color: #ccc;">This may take a few seconds</div>
-                `;
-                document.body.appendChild(progressDiv);
-                
                 // Set flag to prevent real-time listener updates during bulk operation
                 this.isResetting = true;
 
-                // Clear Firestore collections if Firebase is available
+                // OPTIMISTIC UI: Clear local data IMMEDIATELY (instant feedback)
+                this.employees = [];
+                this.shiftTypes = [];
+                this.jobRoles = [];
+                this.schedules = [];
+
+                // Clear localStorage (instant)
+                localStorage.removeItem('workforce_employees');
+                localStorage.removeItem('workforce_shiftTypes');
+                localStorage.removeItem('workforce_jobRoles');
+                localStorage.removeItem('workforce_schedules');
+
+                // Reset to initial state - Monday of current week
+                const startDate = new Date();
+                startDate.setDate(startDate.getDate() - startDate.getDay() + 1);
+                this.currentWeekStart = startDate;
+
+                // Force refresh all views IMMEDIATELY (user sees empty calendar instantly)
+                console.log('🔄 Refreshing views...');
+                this.renderCurrentView();
+
+                // Show toast notification
+                this.showToast('Data cleared. Syncing to cloud...', 'info');
+
+                // BACKGROUND: Sync Firebase deletion (non-blocking)
                 if (this.firebaseManager) {
-                    console.log('🧹 Clearing Firestore collections in parallel...');
-                    // Clear all collections in parallel for maximum speed
-                    await Promise.all([
+                    console.log('🧹 Clearing Firestore collections in background...');
+                    Promise.all([
                         this.dataManager.clearCollection('employees'),
                         this.dataManager.clearCollection('shiftTypes'),
                         this.dataManager.clearCollection('jobRoles'),
                         this.dataManager.clearCollection('schedules')
-                    ]);
-                    console.log('✅ All Firestore collections cleared');
+                    ]).then(() => {
+                        console.log('✅ All Firestore collections cleared');
+                        this.isResetting = false;
+                        this.showToast('✅ Cloud sync complete!', 'success');
+                    }).catch(error => {
+                        console.error('❌ Firebase sync failed:', error);
+                        this.isResetting = false;
+                        this.showToast('⚠️ Cloud sync failed', 'error');
+                    });
+                } else {
+                    this.isResetting = false;
+                    this.showToast('✅ Data reset complete!', 'success');
                 }
 
-            // Clear all data arrays
-            this.employees = [];
-            this.shiftTypes = [];
-            this.jobRoles = [];
-            this.schedules = [];
-
-                // Clear localStorage (fallback)
-            localStorage.removeItem('workforce_employees');
-            localStorage.removeItem('workforce_shiftTypes');
-            localStorage.removeItem('workforce_jobRoles');
-            localStorage.removeItem('workforce_schedules');
-
-            // Reset to initial state - Monday of current week
-            const startDate = new Date();
-            startDate.setDate(startDate.getDate() - startDate.getDay() + 1); // Monday of current week
-            this.currentWeekStart = startDate;
-
-                // Wait a moment for any pending operations to complete
-                await new Promise(resolve => setTimeout(resolve, 100));
-
-                // Clear the resetting flag
-                this.isResetting = false;
-
-                // Force refresh all views
-                console.log('🔄 Refreshing all views...');
-            this.renderCurrentView();
-
-                // Force calendar refresh
-                if (this.calendarRenderer) {
-                    this.calendarRenderer.renderScheduleMatrix();
-                }
-
-                // Remove progress indicator
-                const progressEl = document.getElementById('resetProgress');
-                if (progressEl) progressEl.remove();
-
-                console.log('✅ Reset completed successfully');
-            await showAlert('All data has been reset successfully!', 'Reset Complete');
+                console.log('✅ Local reset completed instantly');
             } catch (error) {
                 console.error('❌ Error during reset:', error);
-                this.isResetting = false; // Clear flag on error
-                
-                // Remove progress indicator on error
-                const progressEl = document.getElementById('resetProgress');
-                if (progressEl) progressEl.remove();
-                
-                await showAlert('Error occurred during reset. Please try again.', 'Reset Error');
+                this.isResetting = false;
+                this.showToast('Error during reset', 'error');
             }
         }
     }
 
     // Clear only schedules (calendar) while keeping employees, shift types, and job roles
+    // OPTIMIZED: Optimistic UI - clear local data instantly, sync Firebase in background
     async clearCalendarOnly() {
-        if (await showConfirm('Clear calendar only? This will remove all shift assignments but keep Employees, Shift Types, and Job Roles.\n\n⚠️ This operation may take a few seconds to complete.', 'Clear Calendar')) {
+        if (await showConfirm('Clear calendar only? This will remove all shift assignments but keep Employees, Shift Types, and Job Roles.', 'Clear Calendar')) {
             try {
                 // Set flag to prevent real-time listener updates during bulk operation
                 this.isResetting = true;
 
-                // Show progress modal
-                const progressModal = document.createElement('div');
-                progressModal.style.cssText = `
-                    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                    background: rgba(0,0,0,0.7); display: flex; align-items: center;
-                    justify-content: center; z-index: 10000; color: white;
-                `;
-                progressModal.innerHTML = `
-                    <div style="background: white; color: black; padding: 20px; border-radius: 8px; text-align: center;">
-                        <div style="margin-bottom: 10px;">🧹 Clearing Calendar...</div>
-                        <div style="font-size: 14px; color: #666;">This may take a few seconds</div>
-                    </div>
-                `;
-                document.body.appendChild(progressModal);
-
-                // Clear Firestore schedules collection if Firebase is available
-                if (this.firebaseManager) {
-                    console.log('🧹 Clearing Firestore schedules...');
-                    await this.dataManager.clearCollection('schedules');
-                    console.log('✅ Firestore schedules cleared');
-                }
-
-                // Clear schedules array
+                // OPTIMISTIC UI: Clear local data IMMEDIATELY (instant feedback)
                 this.schedules = [];
-
-                // Persist only schedules change
                 localStorage.removeItem('workforce_schedules');
 
-                // Clear the resetting flag
-                this.isResetting = false;
-
-                // Remove progress modal
-                document.body.removeChild(progressModal);
-
-                // Re-render views impacted by schedules
+                // Re-render calendar IMMEDIATELY (user sees empty calendar instantly)
                 this.calendarRenderer.renderScheduleMatrix();
-                this.viewRenderer.renderBalanceView && this.viewRenderer.renderBalanceView();
+                
+                // Show toast notification
+                this.showToast('Calendar cleared. Syncing to cloud...', 'info');
 
-                await showAlert('Calendar cleared. All shift assignments have been removed.', 'Calendar Cleared');
+                // BACKGROUND: Sync Firebase deletion (non-blocking)
+                if (this.firebaseManager) {
+                    console.log('🧹 Clearing Firestore schedules in background...');
+                    this.dataManager.clearCollection('schedules').then(() => {
+                        console.log('✅ Firestore schedules cleared');
+                        this.isResetting = false;
+                        this.showToast('✅ Cloud sync complete!', 'success');
+                    }).catch(error => {
+                        console.error('❌ Firebase sync failed:', error);
+                        this.isResetting = false;
+                        this.showToast('⚠️ Cloud sync failed', 'error');
+                    });
+                } else {
+                    this.isResetting = false;
+                    this.showToast('✅ Calendar cleared!', 'success');
+                }
+
+                console.log('✅ Local calendar clear completed instantly');
             } catch (error) {
                 console.error('❌ Error during calendar clear:', error);
-                this.isResetting = false; // Clear flag on error
-                
-                // Remove progress modal if it exists
-                const progressModal = document.querySelector('[style*="z-index: 10000"]');
-                if (progressModal) {
-                    document.body.removeChild(progressModal);
-                }
-                
-                await showAlert('Error occurred during calendar clear. Please try again.', 'Clear Error');
+                this.isResetting = false;
+                this.showToast('Error during clear', 'error');
             }
         }
     }
 
+    // Show a non-blocking toast notification
+    showToast(message, type = 'info') {
+        // Remove any existing toast
+        const existingToast = document.getElementById('appToast');
+        if (existingToast) existingToast.remove();
 
-
+        const toast = document.createElement('div');
+        toast.id = 'appToast';
+        
+        const bgColor = type === 'success' ? '#10b981' : type === 'error' ? '#ef4444' : '#3b82f6';
+        const icon = type === 'success' ? '✅' : type === 'error' ? '⚠️' : '📊';
+        
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: ${bgColor};
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 10000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            animation: toastSlideIn 0.3s ease-out;
+            max-width: 400px;
+        `;
+        
+        toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+        
+        // Add animation keyframes if not already added
+        if (!document.getElementById('toastStyles')) {
+            const style = document.createElement('style');
+            style.id = 'toastStyles';
+            style.textContent = `
+                @keyframes toastSlideIn {
+                    from { transform: translateX(100%); opacity: 0; }
+                    to { transform: translateX(0); opacity: 1; }
+                }
+                @keyframes toastSlideOut {
+                    from { transform: translateX(0); opacity: 1; }
+                    to { transform: translateX(100%); opacity: 0; }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        document.body.appendChild(toast);
+        
+        // Auto-remove after delay
+        const delay = type === 'success' ? 3000 : type === 'error' ? 5000 : 2500;
+        setTimeout(() => {
+            toast.style.animation = 'toastSlideOut 0.3s ease-in forwards';
+            setTimeout(() => toast.remove(), 300);
+        }, delay);
+    }
 
 
 
@@ -1052,6 +1091,9 @@ class WorkforceScheduleManager {
             const newEmployee = await this.firebaseManager.createEmployee(employee);
             this.employees.push(newEmployee);
             
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('employees');
+            
             // Log activity
             await this.activityManager.ensureActivityLogger();
             if (this.activityManager.activityLogger) {
@@ -1076,6 +1118,9 @@ class WorkforceScheduleManager {
             if (index >= 0) {
                 this.employees[index] = { ...this.employees[index], ...updates };
             }
+            
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('employees');
             
             // Create a merged employee object for logging
             const mergedEmployee = { ...oldEmployee, ...updates };
@@ -1106,6 +1151,9 @@ class WorkforceScheduleManager {
             await this.firebaseManager.deleteEmployee(id);
             this.employees = this.employees.filter(e => e.id !== id);
             
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('employees');
+            
             // Log activity
             await this.activityManager.ensureActivityLogger();
             if (this.activityManager.activityLogger) {
@@ -1126,6 +1174,8 @@ class WorkforceScheduleManager {
         if (this.firebaseManager) {
             const newShiftType = await this.firebaseManager.createShiftType(shiftType);
             this.shiftTypes.push(newShiftType);
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('shiftTypes');
             return newShiftType;
         }
         return null;
@@ -1138,6 +1188,8 @@ class WorkforceScheduleManager {
             if (index >= 0) {
                 this.shiftTypes[index] = { ...this.shiftTypes[index], ...updates };
             }
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('shiftTypes');
             return updated;
         }
         return null;
@@ -1147,6 +1199,8 @@ class WorkforceScheduleManager {
         if (this.firebaseManager) {
             await this.firebaseManager.deleteShiftType(id);
             this.shiftTypes = this.shiftTypes.filter(st => st.id !== id);
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('shiftTypes');
             return true;
         }
         return false;
@@ -1156,6 +1210,8 @@ class WorkforceScheduleManager {
         if (this.firebaseManager) {
             const newRole = await this.firebaseManager.createJobRole(role);
             this.jobRoles.push(newRole);
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('jobRoles');
             return newRole;
         }
         return null;
@@ -1168,6 +1224,8 @@ class WorkforceScheduleManager {
             if (index >= 0) {
                 this.jobRoles[index] = { ...this.jobRoles[index], ...updates };
             }
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('jobRoles');
             return updated;
         }
         return null;
@@ -1177,6 +1235,8 @@ class WorkforceScheduleManager {
         if (this.firebaseManager) {
             await this.firebaseManager.deleteJobRole(id);
             this.jobRoles = this.jobRoles.filter(r => r.id !== id);
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('jobRoles');
             return true;
         }
         return false;
@@ -1186,6 +1246,8 @@ class WorkforceScheduleManager {
         if (this.firebaseManager) {
             const newSchedule = await this.firebaseManager.createSchedule(schedule);
             this.schedules.push(newSchedule);
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('schedules');
             return newSchedule;
         }
         return null;
@@ -1198,6 +1260,8 @@ class WorkforceScheduleManager {
             if (index >= 0) {
                 this.schedules[index] = { ...this.schedules[index], ...updates };
             }
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('schedules');
             return updated;
         }
         return null;
@@ -1207,6 +1271,8 @@ class WorkforceScheduleManager {
         if (this.firebaseManager) {
             await this.firebaseManager.deleteSchedule(id);
             this.schedules = this.schedules.filter(s => s.id !== id);
+            // PERFORMANCE: Invalidate caches
+            this.invalidateCaches('schedules');
             return true;
         }
         return false;

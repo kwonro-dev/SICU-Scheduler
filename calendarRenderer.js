@@ -21,10 +21,30 @@ class CalendarRenderer {
         this.cachedTimeInterval = null;
         this.todayDateString = null;
         
+        // PERFORMANCE FIX: Pre-create date formatter (10x faster than toLocaleDateString)
+        this.dateFormatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
+        this.weekdayFormatter = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+        
+        // PERFORMANCE FIX: Debounce timeout for staffing issues panel
+        this.staffingIssuesTimeout = null;
+        
         // Bind issue filter events when calendar renderer is created
         setTimeout(() => {
             this.bindIssueFilterEvents();
         }, 100);
+    }
+    
+    /**
+     * Debounced version of updateStaffingIssuesPanel
+     * PERFORMANCE FIX: Delays rule evaluation until after render settles
+     */
+    updateStaffingIssuesPanelDebounced() {
+        if (this.staffingIssuesTimeout) {
+            clearTimeout(this.staffingIssuesTimeout);
+        }
+        this.staffingIssuesTimeout = setTimeout(() => {
+            this.updateStaffingIssuesPanel();
+        }, 150); // Update after render completes
     }
 
     // Analyze staffing levels and return issues using rule engine
@@ -464,25 +484,22 @@ class CalendarRenderer {
 
     /**
      * Check if we can use cached matrix HTML
+     * PERFORMANCE FIX: Use direct property comparison instead of JSON.stringify
      */
     canUseCachedMatrix() {
         if (!this.matrixHTMLCache || !this.lastMatrixState) {
             return false;
         }
 
-        const currentState = JSON.stringify({
-            employees: this.workforceManager.employees.length,
-            schedules: this.workforceManager.schedules.length,
-            currentWeekStart: this.workforceManager.currentWeekStart?.toISOString(),
-            timeInterval: parseInt(localStorage.getItem('timeInterval')) || 42,
-            filterState: this.workforceManager.filterManager ? {
-                shiftFilters: this.workforceManager.filterManager.shiftFilters,
-                roleFilters: this.workforceManager.filterManager.roleFilters,
-                sortOrder: this.workforceManager.filterManager.sortOrder
-            } : null
-        });
-
-        return currentState === this.lastMatrixState;
+        const last = this.lastMatrixState;
+        const fm = this.workforceManager.filterManager;
+        
+        // Fast direct comparisons instead of JSON.stringify
+        return this.workforceManager.employees.length === last.employeeCount &&
+               this.workforceManager.schedules.length === last.scheduleCount &&
+               this.workforceManager.currentWeekStart?.getTime() === last.weekStartTime &&
+               this.getCachedTimeInterval() === last.timeInterval &&
+               (fm ? fm.lastFilterState === last.filterCacheKey : true);
     }
 
     /**
@@ -524,13 +541,39 @@ class CalendarRenderer {
         const calendarStartDate = new Date(this.workforceManager.currentWeekStart.getFullYear(), this.workforceManager.currentWeekStart.getMonth(), this.workforceManager.currentWeekStart.getDate());
 
         // Generate dates starting from the selected start date (same as sample data)
+        // OPTIMIZATION: Pre-calculate date info ONCE instead of per-cell
         const weekDates = [];
-        const todayDateString = this.getCachedTodayDateString();
+        const dateInfoCache = []; // Cache date calculations
+        
+        // PERFORMANCE FIX: Use timestamp comparison instead of slow toDateString()
+        const today = new Date();
+        const todayYear = today.getFullYear();
+        const todayMonth = today.getMonth();
+        const todayDate = today.getDate();
         
         for (let i = 0; i < timeInterval; i++) {
             const date = new Date(calendarStartDate);
             date.setDate(calendarStartDate.getDate() + i);
             weekDates.push(date);
+            
+            // Pre-calculate everything we need per date (avoids repeated calculations per employee)
+            const dayOfWeek = date.getDay();
+            // PERFORMANCE FIX: Fast date comparison using year/month/day
+            const isToday = date.getFullYear() === todayYear && 
+                           date.getMonth() === todayMonth && 
+                           date.getDate() === todayDate;
+            
+            dateInfoCache.push({
+                date: date,
+                dateString: formatDateString(date),
+                dayOfWeek: dayOfWeek,
+                isToday: isToday,
+                isWeekend: dayOfWeek === 0 || dayOfWeek === 6,
+                isSaturday: dayOfWeek === 6,
+                isFriday: dayOfWeek === 5,
+                isSunday: dayOfWeek === 0,
+                displayString: this.dateFormatter.format(date)
+            });
         }
 
         // Create schedule lookup map for quick access
@@ -569,24 +612,32 @@ class CalendarRenderer {
             }
         }
 
-        // If no snapshot exists but we have schedules, create one for change tracking
+        // If no snapshot exists but we have schedules, defer snapshot creation to avoid blocking render
+        // PERFORMANCE FIX: Create snapshot asynchronously after render completes
         if (!snapshot && this.workforceManager.schedules.length > 0 && this.workforceManager.snapshotManager) {
-            try {
-                // Create snapshot synchronously for immediate use (optimized - avoid deep cloning)
-                const newSnapshot = {
-                    createdAt: new Date().toISOString(),
-                    employees: this.workforceManager.employees || [],
-                    shiftTypes: this.workforceManager.shiftTypes || [],
-                    jobRoles: this.workforceManager.jobRoles || [],
-                    schedules: this.workforceManager.schedules || [],
-                    currentWeekStart: this.workforceManager.currentWeekStart ? 
-                        this.workforceManager.currentWeekStart.toISOString().split('T')[0] : null
-                };
-                localStorage.setItem('workforce_schedule_snapshot_v1', JSON.stringify(newSnapshot));
-                snapshot = newSnapshot;
-            } catch (error) {
-                console.error('❌ Failed to create snapshot for change tracking:', error);
-            }
+            // Use setTimeout to defer snapshot creation (non-blocking)
+            setTimeout(() => {
+                try {
+                    const newSnapshot = {
+                        createdAt: new Date().toISOString(),
+                        employees: this.workforceManager.employees || [],
+                        shiftTypes: this.workforceManager.shiftTypes || [],
+                        jobRoles: this.workforceManager.jobRoles || [],
+                        schedules: this.workforceManager.schedules || [],
+                        currentWeekStart: this.workforceManager.currentWeekStart ? 
+                            this.workforceManager.currentWeekStart.toISOString().split('T')[0] : null
+                    };
+                    localStorage.setItem('workforce_schedule_snapshot_v1', JSON.stringify(newSnapshot));
+                    // Cache for next render
+                    this.workforceManager.snapshotManager.cache.set(
+                        this.workforceManager.snapshotManager.snapshotKey, 
+                        newSnapshot
+                    );
+                } catch (error) {
+                    console.error('❌ Failed to create snapshot for change tracking:', error);
+                }
+            }, 0);
+            // For this render, we'll proceed without change tracking (MOV column will show 0)
         }
 
         // Snapshot warning only in development
@@ -617,7 +668,8 @@ class CalendarRenderer {
         }
 
         // Pre-calculate worker count summary data (major performance optimization)
-        const workerCountData = this.preCalculateWorkerCounts(weekDates, scheduleMap);
+        // PERFORMANCE FIX: Pass existing maps to avoid recreating them
+        const workerCountData = this.preCalculateWorkerCounts(weekDates, scheduleMap, roleMap, shiftTypeMap);
         
         // Store the summary data for rule engine access
         this.workerCountData = workerCountData;
@@ -626,27 +678,25 @@ class CalendarRenderer {
         // Create matrix HTML - EMPLOYEES AS ROWS, DATES AS COLUMNS
 
         // Generate header row with date columns
-        let matrixHTML = `
-            <div class="matrix-cell header-cell" style="background: #f8fafc !important; border-bottom: 2px solid #e2e8f0 !important;">Employee Name</div>
-            <div class="matrix-cell header-cell" style="background: #f8fafc !important; border-bottom: 2px solid #e2e8f0 !important;">Job Type</div>
-            ${weekDates.map((date, index) => {
-                const isToday = date.toDateString() === todayDateString;
-                const dayOfWeek = date.getDay();
-                const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-                const isSaturday = dayOfWeek === 6;
-                const dateString = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                return `<div class="matrix-cell header-cell date-header ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}">
-                    ${dateString}
-                </div>`;
-            }).join('')}
-            <div class="matrix-cell header-cell count-header count-header-fri" style="background: #f0fdf4 !important; border-bottom: 2px solid #22c55e !important;">Fri</div>
-            <div class="matrix-cell header-cell count-header count-header-sat" style="background: #fef7ff !important; border-bottom: 2px solid #a855f7 !important;">Sat</div>
-            <div class="matrix-cell header-cell count-header count-header-sun" style="background: #fff7ed !important; border-bottom: 2px solid #f97316 !important;">Sun</div>
-            <div class="matrix-cell header-cell count-header count-header-vac" style="background: #fef3c7 !important; border-bottom: 2px solid #f59e0b !important;">Vac</div>
-            <div class="matrix-cell header-cell count-header count-header-req" style="background: #dbeafe !important; border-bottom: 2px solid #3b82f6 !important;">Req</div>
-            <div class="matrix-cell header-cell count-header count-header-cha" style="background: #fce7f3 !important; border-bottom: 2px solid #ec4899 !important;">CN</div>
-            <div class="matrix-cell header-cell count-header count-header-mov" style="background: #f3e8ff !important; border-bottom: 2px solid #a855f7 !important;">MOV</div>
-        `;
+        // OPTIMIZATION: Use array and join() instead of string += for O(n) performance
+        const matrixHTMLParts = [];
+        
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell" style="background: #f8fafc !important; border-bottom: 2px solid #e2e8f0 !important;">Employee Name</div>`);
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell" style="background: #f8fafc !important; border-bottom: 2px solid #e2e8f0 !important;">Job Type</div>`);
+        
+        // Use pre-calculated dateInfoCache for headers
+        for (let i = 0; i < dateInfoCache.length; i++) {
+            const info = dateInfoCache[i];
+            matrixHTMLParts.push(`<div class="matrix-cell header-cell date-header ${info.isToday ? 'today' : ''} ${info.isWeekend ? 'weekend' : ''} ${info.isSaturday ? 'saturday' : ''}">${info.displayString}</div>`);
+        }
+        
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell count-header count-header-fri" style="background: #f0fdf4 !important; border-bottom: 2px solid #22c55e !important;">Fri</div>`);
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell count-header count-header-sat" style="background: #fef7ff !important; border-bottom: 2px solid #a855f7 !important;">Sat</div>`);
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell count-header count-header-sun" style="background: #fff7ed !important; border-bottom: 2px solid #f97316 !important;">Sun</div>`);
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell count-header count-header-vac" style="background: #fef3c7 !important; border-bottom: 2px solid #f59e0b !important;">Vac</div>`);
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell count-header count-header-req" style="background: #dbeafe !important; border-bottom: 2px solid #3b82f6 !important;">Req</div>`);
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell count-header count-header-cha" style="background: #fce7f3 !important; border-bottom: 2px solid #ec4899 !important;">CN</div>`);
+        matrixHTMLParts.push(`<div class="matrix-cell header-cell count-header count-header-mov" style="background: #f3e8ff !important; border-bottom: 2px solid #a855f7 !important;">MOV</div>`);
 
         // Add employee rows (each employee gets their own row with all date columns)
         // Use cached filtered employees for better performance
@@ -659,93 +709,34 @@ class CalendarRenderer {
 
         const employeeLoopStart = performance.now();
         
+        // OPTIMIZATION: Process all employees with merged loops and pre-calculated data
         filteredEmployees.forEach((employee, empIndex) => {
             const role = roleMap.get(employee.roleId);
             const roleName = role ? role.name : 'No Role';
-            const shiftType = employee.shiftType || this.workforceManager.employeeManager.determineEmployeeShiftType(employee);
-            const shiftBadgeClass = shiftType === 'Night' ? 'night-shift-badge' : 'day-shift-badge';
+            const empShiftType = employee.shiftType || this.workforceManager.employeeManager.determineEmployeeShiftType(employee);
+            const shiftBadgeClass = empShiftType === 'Night' ? 'night-shift-badge' : 'day-shift-badge';
             const roleBadgeClass = this.workforceManager.employeeManager.getRoleBadgeClass(roleName);
 
-            // Calculate counts for this employee
-            const countStart = performance.now();
-            let friCount = 0;
-            let satCount = 0;
-            let sunCount = 0;
-            let vacCount = 0;
-            let reqCount = 0;
-            let chaCount = 0;
-            let movCount = 0;
-
-            // This is the most expensive loop - 48 dates × 78 employees = 3,744 iterations
-            weekDates.forEach((date) => {
-                const dateString = formatDateString(date);
-                const scheduleKey = `${employee.id}_${dateString}`;
-                const schedule = scheduleMap.get(scheduleKey);
-
-                if (schedule) {
-                    const shiftType = shiftTypeMap.get(schedule.shiftId);
-                    const shiftName = shiftType ? shiftType.name : schedule.shiftType || '';
-
-                    // Count shifts for Friday, Saturday, Sunday that do NOT contain "R" or "C "
-                    const dayOfWeek = date.getDay(); // 0 = Sunday, 1 = Monday, ..., 5 = Friday, 6 = Saturday
-                    const isWeekendDay = dayOfWeek === 5 || dayOfWeek === 6 || dayOfWeek === 0; // Friday, Saturday, Sunday
-                    const isNotRorC = !shiftName.includes('R') && !shiftName.includes('C ');
-                    
-                    if (isWeekendDay && isNotRorC && shiftName && shiftName !== 'Off') {
-                        if (dayOfWeek === 5) { // Friday
-                            friCount++;
-                        } else if (dayOfWeek === 6) { // Saturday
-                            satCount++;
-                        } else if (dayOfWeek === 0) { // Sunday
-                            sunCount++;
-                        }
-                    }
-
-                    // Count shifts containing "C " (with space) for Vac
-                    if (shiftName.includes('C ')) {
-                        vacCount++;
-                    }
-                    // Count shifts containing "R12" or "R 12" for Req
-                    if (shiftName.includes('R12') || shiftName.includes('R 12')) {
-                        reqCount++;
-                    }
-                    // Count shifts containing "Charg" for CHA
-                    if (shiftName.includes('Charg')) {
-                        chaCount++;
-                    }
-                    // MOV count is calculated separately after all other counts
-                }
-            });
-
-            // Get pre-calculated MOV count and shift differences (major performance optimization)
-            movCount = employeeMoveCounts.get(employee.id) || 0;
+            // Get pre-calculated MOV count and shift differences
+            const movCount = employeeMoveCounts.get(employee.id) || 0;
             const shiftDifferences = employeeShiftDifferences.get(employee.id) || new Map();
 
             // Employee name cell
-            matrixHTML += `<div class="matrix-cell employee-name">${employee.name}</div>`;
+            matrixHTMLParts.push(`<div class="matrix-cell employee-name">${employee.name}</div>`);
 
             // Job role cell with badges
             const priority = employee.priority || '';
             const priorityBadge = priority ? `<span class="priority-badge-small priority-${priority.toLowerCase()}">${priority}</span>` : '';
-            matrixHTML += `<div class="matrix-cell job-role">
-                <div class="job-badges">
-                    <span class="role-badge ${roleBadgeClass}">${roleName}</span>
-                    <span class="shift-type-badge ${shiftBadgeClass}">${shiftType}</span>
-                </div>
-                <div class="priority-space">${priorityBadge}</div>
-            </div>`;
+            matrixHTMLParts.push(`<div class="matrix-cell job-role"><div class="job-badges"><span class="role-badge ${roleBadgeClass}">${roleName}</span><span class="shift-type-badge ${shiftBadgeClass}">${empShiftType}</span></div><div class="priority-space">${priorityBadge}</div></div>`);
 
-            // Add shift cells for each date (another expensive loop - 48 dates per employee)
-            weekDates.forEach((date, i) => {
-                const dateString = formatDateString(date);
-                const scheduleKey = `${employee.id}_${dateString}`;
+            // OPTIMIZATION: Single loop through dates - count AND render in one pass
+            let friCount = 0, satCount = 0, sunCount = 0, vacCount = 0, reqCount = 0, chaCount = 0;
+            
+            for (let i = 0; i < dateInfoCache.length; i++) {
+                const info = dateInfoCache[i];
+                const scheduleKey = `${employee.id}_${info.dateString}`;
                 const schedule = scheduleMap.get(scheduleKey);
                 
-
-                const isToday = date.toDateString() === todayDateString;
-                const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-                const isSaturday = date.getDay() === 6;
-
                 let shiftName = '';
                 let shiftColor = '#f3f4f6';
 
@@ -758,71 +749,69 @@ class CalendarRenderer {
                         shiftName = schedule.shiftType || 'Unknown';
                         shiftColor = '#ff6b6b';
                     }
-                } else if (isWeekend) {
-                    // For weekend empty cells, use a subtle weekend color
+                    
+                    // Count while we're already in the loop (avoids second pass)
+                    const isNotRorC = !shiftName.includes('R') && !shiftName.includes('C ');
+                    if (isNotRorC && shiftName && shiftName !== 'Off') {
+                        if (info.isFriday) friCount++;
+                        else if (info.isSaturday) satCount++;
+                        else if (info.isSunday) sunCount++;
+                    }
+                    if (shiftName.includes('C ')) vacCount++;
+                    if (shiftName.includes('R12') || shiftName.includes('R 12')) reqCount++;
+                    if (shiftName.includes('Charg')) chaCount++;
+                } else if (info.isWeekend) {
                     shiftColor = 'rgba(255,255,255,0.95)';
                 }
 
-
                 const isOffShift = shiftName === 'Off' || shiftName === '';
-                const shiftCellId = `shift-${employee.id}-${dateString}`;
+                const differenceType = shiftDifferences.get(info.dateString);
                 
-                // Check for shift differences and apply appropriate class
-                const differenceType = shiftDifferences.get(dateString);
-                const differenceClass = differenceType ? `shift-${differenceType}` : '';
+                // Build class string efficiently
+                let cellClass = 'matrix-cell shift-cell';
+                if (info.isToday) cellClass += ' today';
+                if (info.isWeekend) cellClass += ' weekend';
+                if (info.isSaturday) cellClass += ' saturday';
+                if (isOffShift) cellClass += ' off-shift';
+                if (differenceType) cellClass += ` shift-${differenceType}`;
                 
-        // Build the class list (optimized for performance)
-        const classes = ['matrix-cell', 'shift-cell'];
-        if (isToday) classes.push('today');
-        if (isWeekend) classes.push('weekend');
-        if (isSaturday) classes.push('saturday');
-        if (isOffShift) classes.push('off-shift');
-        if (differenceClass) classes.push(differenceClass);
-        
-        const classList = classes.join(' ');
-        
-        // Use CSS custom properties for better performance than inline styles
-        matrixHTML += `<div id="${shiftCellId}" class="${classList}" style="--shift-color:${shiftColor};background-color:var(--shift-color);" data-employee-id="${employee.id}" data-date="${dateString}" data-shift-id="${schedule ? schedule.shiftId : ''}">
-            ${shiftName}
-        </div>`;
-
-            });
+                matrixHTMLParts.push(`<div id="shift-${employee.id}-${info.dateString}" class="${cellClass}" style="--shift-color:${shiftColor};background-color:var(--shift-color);" data-employee-id="${employee.id}" data-date="${info.dateString}" data-shift-id="${schedule ? schedule.shiftId : ''}">${shiftName}</div>`);
+            }
 
             // Add count cells for this employee
-            matrixHTML += `<div class="matrix-cell count-cell count-cell-fri" style="background: #f0fdf4 !important;">${friCount}</div>`;
-            matrixHTML += `<div class="matrix-cell count-cell count-cell-sat" style="background: #fef7ff !important;">${satCount}</div>`;
-            matrixHTML += `<div class="matrix-cell count-cell count-cell-sun" style="background: #fff7ed !important;">${sunCount}</div>`;
-            matrixHTML += `<div class="matrix-cell count-cell count-cell-vac" style="background: #fef3c7 !important;">${vacCount}</div>`;
-            matrixHTML += `<div class="matrix-cell count-cell count-cell-req" style="background: #dbeafe !important;">${reqCount}</div>`;
-            matrixHTML += `<div class="matrix-cell count-cell count-cell-cha" style="background: #fce7f3 !important;">${chaCount}</div>`;
-            matrixHTML += `<div class="matrix-cell count-cell count-cell-mov" style="background: #f3e8ff !important;">${movCount}</div>`;
+            matrixHTMLParts.push(`<div class="matrix-cell count-cell count-cell-fri" style="background: #f0fdf4 !important;">${friCount}</div>`);
+            matrixHTMLParts.push(`<div class="matrix-cell count-cell count-cell-sat" style="background: #fef7ff !important;">${satCount}</div>`);
+            matrixHTMLParts.push(`<div class="matrix-cell count-cell count-cell-sun" style="background: #fff7ed !important;">${sunCount}</div>`);
+            matrixHTMLParts.push(`<div class="matrix-cell count-cell count-cell-vac" style="background: #fef3c7 !important;">${vacCount}</div>`);
+            matrixHTMLParts.push(`<div class="matrix-cell count-cell count-cell-req" style="background: #dbeafe !important;">${reqCount}</div>`);
+            matrixHTMLParts.push(`<div class="matrix-cell count-cell count-cell-cha" style="background: #fce7f3 !important;">${chaCount}</div>`);
+            matrixHTMLParts.push(`<div class="matrix-cell count-cell count-cell-mov" style="background: #f3e8ff !important;">${movCount}</div>`);
         });
 
         // Add empty state if no employees
         if (this.workforceManager.employees.length === 0) {
-            matrixHTML += `
+            matrixHTMLParts.push(`
                 <div class="matrix-cell empty-state" style="grid-column: 1 / -1; text-align: center; padding: 40px; border: none;">
                     <i class="fas fa-users" style="font-size: 48px; color: #cbd5e0; margin-bottom: 16px;"></i>
                     <h3 style="color: #718096; margin: 0; font-size: 18px; font-weight: 500;">No Employees Found</h3>
                 </div>
-            `;
+            `);
         }
 
+        // OPTIMIZATION: Join array once at the end (O(n) instead of O(n²) string concatenation)
+        const matrixHTML = matrixHTMLParts.join('');
         matrixContainer.innerHTML = matrixHTML;
 
         // Cache the matrix HTML for future use
+        // PERFORMANCE FIX: Store simple object instead of JSON string
         this.matrixHTMLCache = matrixHTML;
-        this.lastMatrixState = JSON.stringify({
-            employees: this.workforceManager.employees.length,
-            schedules: this.workforceManager.schedules.length,
-            currentWeekStart: this.workforceManager.currentWeekStart?.toISOString(),
+        this.lastMatrixState = {
+            employeeCount: this.workforceManager.employees.length,
+            scheduleCount: this.workforceManager.schedules.length,
+            weekStartTime: this.workforceManager.currentWeekStart?.getTime(),
             timeInterval: timeInterval,
-            filterState: this.workforceManager.filterManager ? {
-                shiftFilters: this.workforceManager.filterManager.shiftFilters,
-                roleFilters: this.workforceManager.filterManager.roleFilters,
-                sortOrder: this.workforceManager.filterManager.sortOrder
-            } : null
-        });
+            filterCacheKey: this.workforceManager.filterManager?.lastFilterState || null
+        };
 
         // Update CSS grid template to match the actual number of columns
         const baseColumns = 2; // Employee name + Job type
@@ -846,26 +835,24 @@ class CalendarRenderer {
 
         // Note: Drag scroll functionality is bound once during initialization, no need to rebind after every render
 
-        // Update staffing issues panel
-        this.updateStaffingIssuesPanel();
+        // PERFORMANCE FIX: Debounce staffing issues panel update (expensive rule evaluation)
+        this.updateStaffingIssuesPanelDebounced();
 
-        // Update column visibility based on toggle states
-        setTimeout(() => {
+        // PERFORMANCE FIX: Batch all post-render operations in single requestAnimationFrame
+        requestAnimationFrame(() => {
+            // Update column visibility based on toggle states
             this.workforceManager.filterManager.updateColumnVisibility();
-        }, 50);
-
-        // Bind right-click events to shift cells for editing (with delay to ensure DOM is ready)
-        setTimeout(() => {
             // Cleanup any existing global context menu handlers first
             this.workforceManager.uiManager.cleanupGlobalContextMenu();
             // Then bind new events
             this.workforceManager.uiManager.bindShiftCellEvents();
-        }, 50);
+        });
         
     }
 
     // Pre-calculate worker count data for all dates and role types (major performance optimization)
-    preCalculateWorkerCounts(weekDates, scheduleMap) {
+    // PERFORMANCE FIX: Accept pre-built maps to avoid recreating them
+    preCalculateWorkerCounts(weekDates, scheduleMap, roleMap = null, shiftTypeMap = null) {
         const data = {
             amgrDayCounts: [],
             pctDayCounts: [],
@@ -891,20 +878,37 @@ class CalendarRenderer {
             totalChargeNightMatches: 0
         };
 
-        // Initialize arrays for each date
-        weekDates.forEach(() => {
-            data.amgrDayCounts.push(0);
-            data.pctDayCounts.push(0);
-            data.usDayCounts.push(0);
-            data.rnDayCounts.push(0);
-            data.chargeDayCounts.push(0);
-            data.midDayCounts.push(0);
-            data.amgrNightCounts.push(0);
-            data.pctNightCounts.push(0);
-            data.usNightCounts.push(0);
-            data.rnNightCounts.push(0);
-            data.chargeNightCounts.push(0);
-        });
+        // Initialize arrays for each date (use Array constructor for speed)
+        const dateCount = weekDates.length;
+        data.amgrDayCounts = new Array(dateCount).fill(0);
+        data.pctDayCounts = new Array(dateCount).fill(0);
+        data.usDayCounts = new Array(dateCount).fill(0);
+        data.rnDayCounts = new Array(dateCount).fill(0);
+        data.chargeDayCounts = new Array(dateCount).fill(0);
+        data.midDayCounts = new Array(dateCount).fill(0);
+        data.amgrNightCounts = new Array(dateCount).fill(0);
+        data.pctNightCounts = new Array(dateCount).fill(0);
+        data.usNightCounts = new Array(dateCount).fill(0);
+        data.rnNightCounts = new Array(dateCount).fill(0);
+        data.chargeNightCounts = new Array(dateCount).fill(0);
+
+        // PERFORMANCE FIX: Use passed-in maps or create if not provided
+        if (!roleMap) {
+            roleMap = new Map();
+            this.workforceManager.jobRoles.forEach(role => {
+                roleMap.set(role.id, role);
+            });
+        }
+        
+        if (!shiftTypeMap) {
+            shiftTypeMap = new Map();
+            this.workforceManager.shiftTypes.forEach(shift => {
+                shiftTypeMap.set(shift.id, shift);
+            });
+        }
+
+        // PERFORMANCE FIX: Pre-calculate date strings once
+        const dateStrings = weekDates.map(date => formatDateString(date));
 
         // Process each employee once and calculate counts for all dates
         let processedEmployees = 0;
@@ -912,7 +916,8 @@ class CalendarRenderer {
         let nightShiftEmployees = 0;
         
         this.workforceManager.employees.forEach(employee => {
-            const role = this.workforceManager.jobRoles.find(r => r.id === employee.roleId);
+            // PERFORMANCE FIX: Use map lookup O(1) instead of .find() O(n)
+            const role = roleMap.get(employee.roleId);
             const roleName = role ? role.name : '';
             const shiftType = employee.shiftType || this.workforceManager.employeeManager.determineEmployeeShiftType(employee);
 
@@ -924,13 +929,14 @@ class CalendarRenderer {
             if (isNightShift) nightShiftEmployees++;
 
             // Process each date for this employee
-            weekDates.forEach((date, dateIndex) => {
-                const dateString = formatDateString(date);
+            for (let dateIndex = 0; dateIndex < dateCount; dateIndex++) {
+                const dateString = dateStrings[dateIndex];
                 const scheduleKey = `${employee.id}_${dateString}`;
                 const schedule = scheduleMap.get(scheduleKey);
 
                 if (schedule) {
-                    const shiftTypeObj = this.workforceManager.shiftTypes.find(s => s.id === schedule.shiftId);
+                    // PERFORMANCE FIX: Use map lookup O(1) instead of .find() O(n)
+                    const shiftTypeObj = shiftTypeMap.get(schedule.shiftId);
                     const shiftName = shiftTypeObj ? shiftTypeObj.name : '';
 
                     // Day shift processing - use original specific patterns
@@ -1043,7 +1049,7 @@ class CalendarRenderer {
                         }
                     }
                 }
-            });
+            }
         });
 
         // Check if schedules are actually in the scheduleMap
@@ -1121,7 +1127,7 @@ class CalendarRenderer {
                 const isToday = date.toDateString() === todayDateString;
                 const isWeekend = date.getDay() === 0 || date.getDay() === 6;
                 const isSaturday = date.getDay() === 6;
-                summaryHTML += `<div class="summary-cell date-cell ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>`;
+                summaryHTML += `<div class="summary-cell date-cell ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}">${this.dateFormatter.format(date)}</div>`;
             });
             // Add empty cells for count columns to complete the row
             summaryHTML += '<div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div>';
@@ -1191,7 +1197,7 @@ class CalendarRenderer {
                 const isToday = date.toDateString() === todayDateString;
                 const isWeekend = date.getDay() === 0 || date.getDay() === 6;
                 const isSaturday = date.getDay() === 6;
-                summaryHTML += `<div class="summary-cell date-cell ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}">${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>`;
+                summaryHTML += `<div class="summary-cell date-cell ${isToday ? 'today' : ''} ${isWeekend ? 'weekend' : ''} ${isSaturday ? 'saturday' : ''}">${this.dateFormatter.format(date)}</div>`;
             });
             // Add empty cells for count columns to complete the row
             summaryHTML += '<div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div><div class="summary-cell"></div>';

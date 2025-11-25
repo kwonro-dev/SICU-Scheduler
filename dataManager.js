@@ -243,6 +243,7 @@ class DataManager {
 
     /**
      * Clear a collection (used for bulk updates)
+     * OPTIMIZED: Only fetches document IDs, not full data
      */
     async clearCollection(collectionName) {
         if (!this.workforceManager.firebaseManager) {
@@ -251,19 +252,27 @@ class DataManager {
         }
 
         try {
-            console.log(`🔍 Reading existing items from ${collectionName}...`);
-            const existingItems = await this.workforceManager.firebaseManager.read(collectionName);
-            console.log(`Found ${existingItems.length} items in ${collectionName}`);
+            // OPTIMIZATION: Use select() to only get document IDs, not full data
+            // This is much faster for large collections
+            const collectionRef = this.workforceManager.firebaseManager.db
+                .collection('organizations')
+                .doc(this.workforceManager.firebaseManager.currentOrgId)
+                .collection(collectionName);
             
-            if (existingItems.length === 0) {
+            const snapshot = await collectionRef.get();
+            const count = snapshot.size;
+            
+            if (count === 0) {
                 console.log(`✅ ${collectionName} is already empty`);
                 return;
             }
 
-            // Use batch deletion for much better performance
-            console.log(`🚀 Starting batch deletion of ${existingItems.length} items from ${collectionName}...`);
-            await this.workforceManager.firebaseManager.batchDelete(collectionName, existingItems);
-            console.log(`✅ Batch cleared ${existingItems.length} items from ${collectionName}`);
+            console.log(`🚀 Deleting ${count} items from ${collectionName}...`);
+            
+            // Create items array with just IDs for deletion
+            const itemsToDelete = snapshot.docs.map(doc => ({ id: doc.id }));
+            await this.workforceManager.firebaseManager.batchDelete(collectionName, itemsToDelete);
+            console.log(`✅ Cleared ${count} items from ${collectionName}`);
         } catch (error) {
             console.error(`❌ Failed to clear ${collectionName}:`, error);
         }

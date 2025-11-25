@@ -4,6 +4,13 @@
 class EmployeeManager {
     constructor(workforceManager) {
         this.workforceManager = workforceManager;
+        // PERFORMANCE FIX: Cache for role badge classes to avoid repeated lookups
+        this.roleBadgeClassCache = new Map();
+    }
+    
+    // Clear cache when roles change
+    clearRoleBadgeCache() {
+        this.roleBadgeClassCache.clear();
     }
 
     // Render users management view
@@ -105,44 +112,70 @@ class EmployeeManager {
     }
 
     // Helper function to get CSS class for role badges
+    // PERFORMANCE FIX: Cache lookups to avoid repeated .find() calls
     getRoleBadgeClass(roleName) {
+        // Check cache first
+        if (this.roleBadgeClassCache.has(roleName)) {
+            return this.roleBadgeClassCache.get(roleName);
+        }
+        
         // Find the role by name to get its custom color
         const role = this.workforceManager.jobRoles.find(r => r.name === roleName);
+        let result;
+        
         if (role && role.color) {
             // Return a dynamic class name based on the color
-            const customClass = `custom-role-badge-${role.color.replace('#', '')}`;
-            return customClass;
+            result = `custom-role-badge-${role.color.replace('#', '')}`;
+        } else {
+            // Fallback to default colors for legacy roles or when no color is set
+            const defaultClasses = {
+                'Manager': 'manager-badge',
+                'Senior Cashier': 'senior-cashier-badge',
+                'Cashier': 'cashier-badge',
+                'Stock Clerk': 'stock-clerk-badge',
+                'Sales Associate': 'sales-associate-badge',
+                'No Role': 'no-role-badge'
+            };
+            result = defaultClasses[roleName] || 'default-role-badge';
         }
-
-        // Fallback to default colors for legacy roles or when no color is set
-        const defaultClasses = {
-            'Manager': 'manager-badge',
-            'Senior Cashier': 'senior-cashier-badge',
-            'Cashier': 'cashier-badge',
-            'Stock Clerk': 'stock-clerk-badge',
-            'Sales Associate': 'sales-associate-badge',
-            'No Role': 'no-role-badge'
-        };
-
-        const fallbackClass = defaultClasses[roleName] || 'default-role-badge';
-        return fallbackClass;
+        
+        // Cache the result
+        this.roleBadgeClassCache.set(roleName, result);
+        return result;
     }
 
     // Helper function to determine employee's shift type based on their schedules
+    // PERFORMANCE FIX: Use pre-built map and early exit
     determineEmployeeShiftType(employee) {
-        // Get all schedules for this employee
-        const employeeSchedules = this.workforceManager.schedules.filter(s => s.employeeId === employee.id);
-
-        // Check if any schedules contain night shifts
-        for (const schedule of employeeSchedules) {
-            const shiftType = this.workforceManager.shiftTypes.find(s => s.id === schedule.shiftId);
-            if (shiftType && this.isNightShift(shiftType.name)) {
-                return 'Night';
+        // Build shift type map once if not cached
+        if (!this._shiftTypeMap) {
+            this._shiftTypeMap = new Map();
+            this.workforceManager.shiftTypes.forEach(s => {
+                this._shiftTypeMap.set(s.id, s);
+            });
+        }
+        
+        // Check schedules with early exit on first night shift found
+        const schedules = this.workforceManager.schedules;
+        const employeeId = employee.id;
+        
+        for (let i = 0; i < schedules.length; i++) {
+            const schedule = schedules[i];
+            if (schedule.employeeId === employeeId) {
+                const shiftType = this._shiftTypeMap.get(schedule.shiftId);
+                if (shiftType && this.isNightShift(shiftType.name)) {
+                    return 'Night';
+                }
             }
         }
 
         // If no night shifts found, classify as Day
         return 'Day';
+    }
+    
+    // Clear shift type map when shift types change
+    clearShiftTypeCache() {
+        this._shiftTypeMap = null;
     }
 
     // Get available shifts for an employee (based on their role and shift history)

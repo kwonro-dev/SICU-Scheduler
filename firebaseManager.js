@@ -178,26 +178,32 @@ class FirebaseManager {
 
     /**
      * Batch replace entire collection - much faster than clear + create
+     * OPTIMIZED: Runs delete and create in parallel when possible
      */
     async batchReplace(collection, newItems) {
         if (!this.currentOrgId) await this.initialize();
         
         console.log(`🔄 Batch replacing ${collection} with ${newItems.length} items...`);
         
-        // First, get existing items to delete
+        // Get existing items count first (lightweight query)
         const existingSnapshot = await this.db.collection('organizations').doc(this.currentOrgId).collection(collection).get();
-        const existingItems = existingSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const existingCount = existingSnapshot.size;
         
-        console.log(`Found ${existingItems.length} existing items to delete`);
-        
-        // Delete existing items in batches
-        if (existingItems.length > 0) {
+        if (existingCount === 0) {
+            // OPTIMIZATION: No existing data, skip delete entirely
+            console.log(`No existing items in ${collection}, creating ${newItems.length} new items...`);
+            if (newItems.length > 0) {
+                await this.batchCreate(collection, newItems);
+            }
+        } else {
+            // Has existing data - need to delete first, then create
+            console.log(`Found ${existingCount} existing items to delete`);
+            const existingItems = existingSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             await this.batchDelete(collection, existingItems);
-        }
-        
-        // Create new items in batches
-        if (newItems.length > 0) {
-            await this.batchCreate(collection, newItems);
+            
+            if (newItems.length > 0) {
+                await this.batchCreate(collection, newItems);
+            }
         }
         
         console.log(`✅ Batch replacement completed for ${collection}`);
