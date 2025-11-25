@@ -22,6 +22,8 @@ class AuthManager {
         const emailEl = document.getElementById('authEmail');
         const passEl = document.getElementById('authPassword');
         const errorEl = document.getElementById('authError');
+        const successEl = document.getElementById('authSuccess');
+        const forgotPasswordLink = document.getElementById('forgotPasswordLink');
 
 
         // Verification UI
@@ -48,9 +50,45 @@ class AuthManager {
 
         const showError = (msg) => {
             if (!errorEl) return;
+            if (successEl) successEl.style.display = 'none';
             errorEl.textContent = msg;
             errorEl.style.display = 'block';
         };
+
+        const showSuccess = (msg) => {
+            if (!successEl) return;
+            if (errorEl) errorEl.style.display = 'none';
+            successEl.textContent = msg;
+            successEl.style.display = 'block';
+        };
+
+        // Forgot Password handler
+        if (forgotPasswordLink) {
+            forgotPasswordLink.addEventListener('click', async (e) => {
+                e.preventDefault();
+                const email = emailEl ? emailEl.value.trim() : '';
+                
+                if (!email) {
+                    showError('Please enter your email address first, then click "Forgot Password?"');
+                    return;
+                }
+                
+                try {
+                    await this.auth.sendPasswordResetEmail(email);
+                    showSuccess(`Password reset email sent to ${email}. Check your inbox (and spam folder).`);
+                } catch (err) {
+                    if (err.code === 'auth/user-not-found') {
+                        showError('No account found with this email address. Please check your email or register a new account.');
+                    } else if (err.code === 'auth/invalid-email') {
+                        showError('Invalid email address format.');
+                    } else if (err.code === 'auth/too-many-requests') {
+                        showError('Too many requests. Please wait a few minutes before trying again.');
+                    } else {
+                        showError(this.humanizeError(err));
+                    }
+                }
+            });
+        }
 
         if (loginBtn) {
             loginBtn.addEventListener('click', async () => {
@@ -795,9 +833,9 @@ class AuthManager {
             statusText = 'Approved';
         }
         
-        // Check for recent password reset
-        const hasRecentReset = userData.passwordResetAt && 
-            (Date.now() - new Date(userData.passwordResetAt).getTime()) < (24 * 60 * 60 * 1000); // 24 hours
+        // Check for recent password reset email sent
+        const hasRecentResetRequest = userData.passwordResetRequestedAt && 
+            (Date.now() - new Date(userData.passwordResetRequestedAt).getTime()) < (24 * 60 * 60 * 1000); // 24 hours
         
         item.innerHTML = `
             <div class="user-info">
@@ -806,13 +844,12 @@ class AuthManager {
                     Created: ${createdAt}
                     ${userData.approvedBy ? ` • Approved by: ${userData.approvedBy}` : ''}
                     ${userData.approvedAt ? ` • Approved: ${new Date(userData.approvedAt).toLocaleString()}` : ''}
-                    ${hasRecentReset ? ` • Password reset by: ${userData.passwordResetBy}` : ''}
-                    ${userData.tempPassword ? ` • Temp password: ${userData.tempPassword}` : ''}
+                    ${hasRecentResetRequest ? ` • Reset email sent by: ${userData.passwordResetRequestedBy} at ${new Date(userData.passwordResetRequestedAt).toLocaleString()}` : ''}
                 </div>
             </div>
             <div class="user-actions">
                 ${approved ? `<button class="btn btn-secondary btn-small" onclick="window.authManager.resetUserPassword('${userId}', '${email}')">
-                    <i class="fas fa-key"></i> Reset Password
+                    <i class="fas fa-envelope"></i> Send Password Reset
                 </button>` : ''}
                 ${!approved ? `<button class="btn btn-primary btn-small" onclick="window.authManager.approveUser('${userId}')">
                     <i class="fas fa-check"></i> Approve
@@ -911,37 +948,39 @@ class AuthManager {
         }
     }
 
-    resetUserPassword(userId, email) {
-        // Generate a simple temporary password
-        const tempPassword = this.generateTempPassword();
+    async resetUserPassword(userId, email) {
+        if (!confirm(`Send a password reset email to ${email}?\n\nThe user will receive an email with a link to create a new password.`)) {
+            return;
+        }
         
-        if (confirm(`Reset password for ${email}?\n\nNew temporary password: ${tempPassword}\n\nPlease copy this password and share it with the user securely.`)) {
-            try {
-                // In a real implementation, you would use Firebase Admin SDK to update the password
-                // For now, we'll store the temporary password in the user document for admin reference
-                this.db.collection('users').doc(userId).update({
-                    tempPassword: tempPassword,
-                    passwordResetAt: new Date().toISOString(),
-                    passwordResetBy: this.user.email
-                });
-                
-                // Copy password to clipboard if possible
-                if (navigator.clipboard) {
-                    navigator.clipboard.writeText(tempPassword).then(() => {
-                        this.showNotification('Password copied to clipboard', 'success');
-                    }).catch(() => {
-                        this.showNotification(`Password reset: ${tempPassword}`, 'info');
-                    });
-                } else {
-                    this.showNotification(`Password reset: ${tempPassword}`, 'info');
-                }
-                
-                // Refresh user list to show updated info
-                this.loadAllUsers();
-                
-            } catch (e) {
-                console.error('Error resetting password:', e);
-                this.showNotification('Failed to reset password', 'error');
+        try {
+            // Use Firebase's built-in password reset email functionality
+            // This sends a secure link to the user's email to reset their password
+            await this.auth.sendPasswordResetEmail(email);
+            
+            // Update user document to record the reset request
+            await this.db.collection('users').doc(userId).update({
+                passwordResetRequestedAt: new Date().toISOString(),
+                passwordResetRequestedBy: this.user.email,
+                // Clear any old temp password that didn't work
+                tempPassword: null
+            });
+            
+            this.showNotification(`Password reset email sent to ${email}`, 'success');
+            
+            // Refresh user list to show updated info
+            this.loadAllUsers();
+            
+        } catch (e) {
+            console.error('Error sending password reset email:', e);
+            
+            // Provide helpful error messages
+            if (e.code === 'auth/user-not-found') {
+                this.showNotification('User not found in authentication system. They may need to re-register.', 'error');
+            } else if (e.code === 'auth/invalid-email') {
+                this.showNotification('Invalid email address', 'error');
+            } else {
+                this.showNotification(`Failed to send reset email: ${e.message}`, 'error');
             }
         }
     }
