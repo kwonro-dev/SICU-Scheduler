@@ -177,27 +177,156 @@ class FirebaseManager {
     }
 
     /**
-     * Batch replace entire collection - much faster than clear + create
-     * OPTIMIZED: Runs delete and create in parallel when possible
+     * Batch replace entire collection - FAST single-document approach for large collections
+     * Stores data as aggregated documents to minimize Firestore operations
      */
     async batchReplace(collection, newItems) {
         if (!this.currentOrgId) await this.initialize();
         
-        console.log(`🔄 Batch replacing ${collection} with ${newItems.length} items...`);
+        console.log(`🚀 Fast replacing ${collection} with ${newItems.length} items...`);
+        const startTime = performance.now();
         
+        // For large collections (schedules), use aggregated document storage
+        // This turns 1000+ operations into just 1-2 operations!
+        if (collection === 'schedules' && newItems.length > 100) {
+            await this.saveAggregatedData(collection, newItems);
+        } else if (collection === 'employees' || collection === 'shiftTypes' || collection === 'jobRoles') {
+            // For smaller collections, use aggregated storage too for speed
+            await this.saveAggregatedData(collection, newItems);
+        } else {
+            // Fallback to individual docs for small collections
+            await this.batchReplaceIndividual(collection, newItems);
+        }
+        
+        const elapsed = performance.now() - startTime;
+        console.log(`✅ ${collection} replaced in ${elapsed.toFixed(0)}ms`);
+    }
+
+    /**
+     * Save data as aggregated documents (FAST - single write operation)
+     * Stores array of items in chunks to stay under Firestore 1MB doc limit
+     */
+    async saveAggregatedData(collection, items) {
+        const orgRef = this.db.collection('organizations').doc(this.currentOrgId);
+        const aggregateRef = orgRef.collection('aggregated').doc(collection);
+        
+        // Firestore doc limit is 1MB. Each schedule is ~200 bytes, so ~4000 per doc is safe
+        // For safety, chunk at 3000 items per document
+        const CHUNK_SIZE = 3000;
+        
+        if (items.length <= CHUNK_SIZE) {
+            // Single document - fastest case
+            await aggregateRef.set({
+                items: items,
+                count: items.length,
+                updatedAt: new Date().toISOString(),
+                chunked: false
+            });
+            console.log(`📦 Saved ${items.length} ${collection} in single aggregated doc`);
+        } else {
+            // Multiple chunks needed
+            const chunks = [];
+            for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+                chunks.push(items.slice(i, i + CHUNK_SIZE));
+            }
+            
+            // Write all chunks in parallel
+            const batch = this.db.batch();
+            batch.set(aggregateRef, {
+                count: items.length,
+                chunkCount: chunks.length,
+                updatedAt: new Date().toISOString(),
+                chunked: true
+            });
+            
+            chunks.forEach((chunk, index) => {
+                const chunkRef = orgRef.collection('aggregated').doc(`${collection}_chunk_${index}`);
+                batch.set(chunkRef, { items: chunk, index: index });
+            });
+            
+            await batch.commit();
+            console.log(`📦 Saved ${items.length} ${collection} in ${chunks.length} chunks`);
+        }
+    }
+
+    /**
+     * Load aggregated data (FAST - single read operation)
+     * OPTIMIZED: Uses cache-first approach for faster loading
+     */
+    async loadAggregatedData(collection, useCache = true) {
+        const orgRef = this.db.collection('organizations').doc(this.currentOrgId);
+        const aggregateRef = orgRef.collection('aggregated').doc(collection);
+        
+        try {
+            let doc;
+            
+            if (useCache) {
+                // Try cache first for instant loading
+                try {
+                    doc = await aggregateRef.get({ source: 'cache' });
+                    if (!doc.exists) {
+                        // Cache miss - try server
+                        doc = await aggregateRef.get({ source: 'server' });
+                    }
+                } catch (cacheError) {
+                    // Cache failed - try server
+                    doc = await aggregateRef.get({ source: 'server' });
+                }
+            } else {
+                doc = await aggregateRef.get();
+            }
+            
+            if (!doc.exists) {
+                return null; // No aggregated data, fall back to individual docs
+            }
+            
+            const data = doc.data();
+            
+            if (!data.chunked) {
+                // Single document - fast path
+                return data.items || [];
+            } else {
+                // Multiple chunks - load all in parallel
+                const chunkPromises = [];
+                const source = useCache ? { source: 'cache' } : {};
+                
+                for (let i = 0; i < data.chunkCount; i++) {
+                    const chunkRef = orgRef.collection('aggregated').doc(`${collection}_chunk_${i}`);
+                    chunkPromises.push(
+                        chunkRef.get(source).catch(() => chunkRef.get({ source: 'server' }))
+                    );
+                }
+                
+                const chunkDocs = await Promise.all(chunkPromises);
+                const allItems = [];
+                chunkDocs.sort((a, b) => (a.data()?.index || 0) - (b.data()?.index || 0));
+                chunkDocs.forEach(chunkDoc => {
+                    if (chunkDoc.exists && chunkDoc.data()?.items) {
+                        allItems.push(...chunkDoc.data().items);
+                    }
+                });
+                
+                return allItems;
+            }
+        } catch (error) {
+            console.warn(`No aggregated data for ${collection}:`, error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Original batch replace for individual documents (slower, kept as fallback)
+     */
+    async batchReplaceIndividual(collection, newItems) {
         // Get existing items count first (lightweight query)
         const existingSnapshot = await this.db.collection('organizations').doc(this.currentOrgId).collection(collection).get();
         const existingCount = existingSnapshot.size;
         
         if (existingCount === 0) {
-            // OPTIMIZATION: No existing data, skip delete entirely
-            console.log(`No existing items in ${collection}, creating ${newItems.length} new items...`);
             if (newItems.length > 0) {
                 await this.batchCreate(collection, newItems);
             }
         } else {
-            // Has existing data - need to delete first, then create
-            console.log(`Found ${existingCount} existing items to delete`);
             const existingItems = existingSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             await this.batchDelete(collection, existingItems);
             
@@ -205,8 +334,6 @@ class FirebaseManager {
                 await this.batchCreate(collection, newItems);
             }
         }
-        
-        console.log(`✅ Batch replacement completed for ${collection}`);
     }
 
     /**
@@ -240,54 +367,61 @@ class FirebaseManager {
 
     /**
      * Get all data with hybrid approach: Firestore + offline persistence + cache
+     * OPTIMIZED: Tries aggregated data first (single doc), falls back to individual docs
      */
     async getAllData() {
         if (!this.currentOrgId) await this.initialize();
         
         const startTime = performance.now();
-        console.log('🚀 Loading all data with hybrid approach...');
+        console.log('🚀 Loading all data (aggregated-first approach)...');
         
-        try {
-            // Use CACHE_FIRST for better performance with offline persistence
-            const options = { source: 'cache' }; // Try cache first, fallback to server
-            
-            // Get all collections in parallel but with a single organization query
-            const orgRef = this.db.collection('organizations').doc(this.currentOrgId);
-            
-            const [employeesSnapshot, shiftTypesSnapshot, jobRolesSnapshot, schedulesSnapshot] = await Promise.all([
-                orgRef.collection('employees').get(options),
-                orgRef.collection('shiftTypes').get(options),
-                orgRef.collection('jobRoles').get(options),
-                orgRef.collection('schedules').get(options)
-            ]);
-            
-            const result = {
-                employees: employeesSnapshot.docs.map(doc => doc.data()),
-                shiftTypes: shiftTypesSnapshot.docs.map(doc => doc.data()),
-                jobRoles: jobRolesSnapshot.docs.map(doc => doc.data()),
-                schedules: schedulesSnapshot.docs.map(doc => doc.data())
-            };
-            
-            // Debug: Check if schedules collection is empty
-            if (result.schedules.length === 0) {
-                console.error('❌ No schedules found in Firestore collection!');
-                console.log('🔍 Schedules snapshot:', {
-                    size: schedulesSnapshot.size,
-                    empty: schedulesSnapshot.empty,
-                    docs: schedulesSnapshot.docs.length
-                });
-            } else {
-                console.log('✅ Schedules loaded from Firestore:', result.schedules.slice(0, 3));
+        // Get all collections in parallel but with a single organization query
+        const orgRef = this.db.collection('organizations').doc(this.currentOrgId);
+        
+        // Helper to load a collection - tries aggregated first, then individual docs
+        const loadCollectionSmart = async (collectionName) => {
+            // Try aggregated data first (FAST - single doc read)
+            const aggregated = await this.loadAggregatedData(collectionName);
+            if (aggregated && aggregated.length > 0) {
+                console.log(`⚡ ${collectionName}: loaded ${aggregated.length} items from aggregated doc`);
+                return aggregated;
             }
             
+            // Fall back to individual docs (slower, for legacy data)
+            try {
+                // Try cache first
+                const cacheSnapshot = await orgRef.collection(collectionName).get({ source: 'cache' });
+                if (cacheSnapshot.size > 0) {
+                    console.log(`📦 ${collectionName}: loaded ${cacheSnapshot.size} items from individual docs (cache)`);
+                    return cacheSnapshot.docs.map(doc => doc.data());
+                }
+                // Cache is empty, fall back to server
+                console.log(`🌐 ${collectionName}: loading from server...`);
+                const serverSnapshot = await orgRef.collection(collectionName).get({ source: 'server' });
+                return serverSnapshot.docs.map(doc => doc.data());
+            } catch (error) {
+                console.warn(`⚠️ ${collectionName}: failed to load`, error);
+                return [];
+            }
+        };
+        
+        try {
+            const [employees, shiftTypes, jobRoles, schedules] = await Promise.all([
+                loadCollectionSmart('employees'),
+                loadCollectionSmart('shiftTypes'),
+                loadCollectionSmart('jobRoles'),
+                loadCollectionSmart('schedules')
+            ]);
+            
+            const result = { employees, shiftTypes, jobRoles, schedules };
+            
             const loadTime = performance.now() - startTime;
-            console.log(`⚡ Single query load completed in ${loadTime.toFixed(2)}ms`);
-            console.log('📊 Single query results:', {
+            console.log(`⚡ Data load completed in ${loadTime.toFixed(0)}ms`);
+            console.log('📊 Loaded:', {
                 employees: result.employees.length,
                 shiftTypes: result.shiftTypes.length,
                 jobRoles: result.jobRoles.length,
-                schedules: result.schedules.length,
-                loadTime: `${loadTime.toFixed(2)}ms`
+                schedules: result.schedules.length
             });
             
             return result;
@@ -306,11 +440,51 @@ class FirebaseManager {
             return;
         }
 
-        const listener = this.db.collection('organizations').doc(this.currentOrgId).collection(collection)
-            .onSnapshot(snapshot => {
-                const data = snapshot.docs.map(doc => doc.data());
-                callback(data);
-            });
+        // Listen to AGGREGATED data (single doc) - matches our new storage format
+        const aggregateRef = this.db.collection('organizations').doc(this.currentOrgId)
+            .collection('aggregated').doc(collection);
+        
+        let hasReceivedData = false; // Track if we've ever received real data
+        
+        const listener = aggregateRef.onSnapshot(doc => {
+            if (doc.exists) {
+                const data = doc.data();
+                if (data.chunked) {
+                    // Chunked data - need to load all chunks (rare, only for very large datasets)
+                    this.loadAggregatedData(collection).then(items => {
+                        if (items && items.length > 0) {
+                            hasReceivedData = true;
+                            callback(items);
+                        }
+                    });
+                } else {
+                    // Single doc - fast path
+                    const items = data.items || [];
+                    if (items.length > 0) {
+                        hasReceivedData = true;
+                        callback(items);
+                    } else if (hasReceivedData) {
+                        // Only send empty if we previously had data (actual deletion)
+                        callback([]);
+                    }
+                    // Otherwise: empty aggregated doc but no prior data - don't overwrite
+                }
+            } else {
+                // No aggregated data exists - check for legacy individual docs
+                // But ONLY if we haven't received real data before (don't overwrite with legacy)
+                if (!hasReceivedData) {
+                    this.db.collection('organizations').doc(this.currentOrgId).collection(collection)
+                        .get().then(snapshot => {
+                            if (snapshot.size > 0) {
+                                hasReceivedData = true;
+                                const data = snapshot.docs.map(doc => doc.data());
+                                callback(data);
+                            }
+                            // If both empty and no prior data, don't callback - let localStorage data stay
+                        });
+                }
+            }
+        });
 
         this.listeners.set(collection, listener);
         return listener;

@@ -76,6 +76,14 @@ class InitializationManager {
             // Measure total initialization time
             const totalTime = performance.now() - this.workforceManager.initStartTime;
             console.log(`✅ Initialized in ${totalTime.toFixed(2)}ms`);
+            
+            // Check if we need to sync localStorage fallback data to Firebase
+            // This happens if user refreshed before previous import completed
+            if (this.workforceManager.hybridDataManager?.pendingFirebaseSync) {
+                console.log('🔄 Detected localStorage fallback data - syncing to Firebase...');
+                // Run in background, don't block UI
+                this.workforceManager.hybridDataManager.syncPendingLocalStorageToFirebase(this.workforceManager);
+            }
         } catch (error) {
             console.error('❌ Firebase initialization failed:', error);
             // Fallback to localStorage if Firebase fails

@@ -829,8 +829,8 @@ class WorkforceScheduleManager {
                 console.log('🔄 Refreshing views...');
                 this.renderCurrentView();
 
-                // Show toast notification
-                this.showToast('Data cleared. Syncing to cloud...', 'info');
+                // Show warning toast during sync
+                this.showToast('Clearing all data...', 'warning', false);
 
                 // BACKGROUND: Sync Firebase deletion (non-blocking)
                 if (this.firebaseManager) {
@@ -843,15 +843,15 @@ class WorkforceScheduleManager {
                     ]).then(() => {
                         console.log('✅ All Firestore collections cleared');
                         this.isResetting = false;
-                        this.showToast('✅ Cloud sync complete!', 'success');
+                        this.showToast('All data cleared successfully', 'success');
                     }).catch(error => {
                         console.error('❌ Firebase sync failed:', error);
                         this.isResetting = false;
-                        this.showToast('⚠️ Cloud sync failed', 'error');
+                        this.showToast('Cloud sync failed - local data cleared', 'error');
                     });
                 } else {
                     this.isResetting = false;
-                    this.showToast('✅ Data reset complete!', 'success');
+                    this.showToast('Data reset complete', 'success');
                 }
 
                 console.log('✅ Local reset completed instantly');
@@ -878,8 +878,8 @@ class WorkforceScheduleManager {
                 // Re-render calendar IMMEDIATELY (user sees empty calendar instantly)
                 this.calendarRenderer.renderScheduleMatrix();
                 
-                // Show toast notification
-                this.showToast('Calendar cleared. Syncing to cloud...', 'info');
+                // Show warning toast during sync
+                this.showToast('Clearing calendar...', 'warning', false);
 
                 // BACKGROUND: Sync Firebase deletion (non-blocking)
                 if (this.firebaseManager) {
@@ -887,15 +887,15 @@ class WorkforceScheduleManager {
                     this.dataManager.clearCollection('schedules').then(() => {
                         console.log('✅ Firestore schedules cleared');
                         this.isResetting = false;
-                        this.showToast('✅ Cloud sync complete!', 'success');
+                        this.showToast('Calendar cleared successfully', 'success');
                     }).catch(error => {
                         console.error('❌ Firebase sync failed:', error);
                         this.isResetting = false;
-                        this.showToast('⚠️ Cloud sync failed', 'error');
+                        this.showToast('Cloud sync failed - local data cleared', 'error');
                     });
                 } else {
                     this.isResetting = false;
-                    this.showToast('✅ Calendar cleared!', 'success');
+                    this.showToast('Calendar cleared', 'success');
                 }
 
                 console.log('✅ Local calendar clear completed instantly');
@@ -908,7 +908,9 @@ class WorkforceScheduleManager {
     }
 
     // Show a non-blocking toast notification
-    showToast(message, type = 'info') {
+    // type: 'info', 'success', 'error', 'warning'
+    // autoDismiss: if false, toast stays until replaced
+    showToast(message, type = 'info', autoDismiss = true) {
         // Remove any existing toast
         const existingToast = document.getElementById('appToast');
         if (existingToast) existingToast.remove();
@@ -916,29 +918,9 @@ class WorkforceScheduleManager {
         const toast = document.createElement('div');
         toast.id = 'appToast';
         
-        const bgColor = type === 'success' ? '#10b981' : type === 'error' ? '#ef4444' : '#3b82f6';
-        const icon = type === 'success' ? '✅' : type === 'error' ? '⚠️' : '📊';
-        
-        toast.style.cssText = `
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: ${bgColor};
-            color: white;
-            padding: 12px 20px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            z-index: 10000;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            font-size: 14px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            animation: toastSlideIn 0.3s ease-out;
-            max-width: 400px;
-        `;
-        
-        toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+        const isWarning = type === 'warning';
+        const isSuccess = type === 'success';
+        const isError = type === 'error';
         
         // Add animation keyframes if not already added
         if (!document.getElementById('toastStyles')) {
@@ -946,25 +928,117 @@ class WorkforceScheduleManager {
             style.id = 'toastStyles';
             style.textContent = `
                 @keyframes toastSlideIn {
-                    from { transform: translateX(100%); opacity: 0; }
+                    from { transform: translateX(120%); opacity: 0; }
                     to { transform: translateX(0); opacity: 1; }
                 }
                 @keyframes toastSlideOut {
                     from { transform: translateX(0); opacity: 1; }
-                    to { transform: translateX(100%); opacity: 0; }
+                    to { transform: translateX(120%); opacity: 0; }
+                }
+                @keyframes spinnerRotate {
+                    from { transform: rotate(0deg); }
+                    to { transform: rotate(360deg); }
+                }
+                @keyframes progressPulse {
+                    0%, 100% { opacity: 1; }
+                    50% { opacity: 0.6; }
                 }
             `;
             document.head.appendChild(style);
         }
         
+        // Base styles
+        toast.style.cssText = `
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: ${isSuccess ? 'linear-gradient(135deg, #059669 0%, #10b981 100%)' : 
+                         isError ? 'linear-gradient(135deg, #dc2626 0%, #ef4444 100%)' : 
+                         isWarning ? 'linear-gradient(135deg, #1e293b 0%, #334155 100%)' : 
+                         'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)'};
+            color: white;
+            padding: ${isWarning ? '16px 20px' : '14px 18px'};
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2), 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 10000;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            animation: toastSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            max-width: 420px;
+            border: 1px solid ${isWarning ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.2)'};
+        `;
+        
+        if (isWarning) {
+            // Warning/syncing toast with spinner
+            toast.innerHTML = `
+                <div style="display: flex; align-items: flex-start; gap: 14px;">
+                    <div style="
+                        width: 36px; 
+                        height: 36px; 
+                        border: 3px solid rgba(251, 191, 36, 0.3); 
+                        border-top-color: #fbbf24; 
+                        border-radius: 50%; 
+                        animation: spinnerRotate 1s linear infinite;
+                        flex-shrink: 0;
+                    "></div>
+                    <div style="flex: 1;">
+                        <div style="font-weight: 600; font-size: 14px; margin-bottom: 4px; color: #fbbf24;">
+                            Syncing to Cloud
+                        </div>
+                        <div style="font-size: 13px; color: rgba(255,255,255,0.8); line-height: 1.4;">
+                            ${message}
+                        </div>
+                        <div style="
+                            margin-top: 10px; 
+                            padding: 8px 12px; 
+                            background: rgba(251, 191, 36, 0.15); 
+                            border-radius: 6px; 
+                            font-size: 12px; 
+                            color: #fcd34d;
+                            display: flex;
+                            align-items: center;
+                            gap: 6px;
+                            animation: progressPulse 2s ease-in-out infinite;
+                        ">
+                            <span style="font-size: 14px;">⚠️</span>
+                            <span>Please wait...</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            // Standard toast
+            const icon = isSuccess ? '✓' : isError ? '✕' : 'ℹ';
+            toast.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <div style="
+                        width: 28px; 
+                        height: 28px; 
+                        background: rgba(255,255,255,0.2); 
+                        border-radius: 50%; 
+                        display: flex; 
+                        align-items: center; 
+                        justify-content: center;
+                        font-weight: bold;
+                        font-size: 14px;
+                        flex-shrink: 0;
+                    ">${icon}</div>
+                    <div style="font-size: 14px; font-weight: 500; line-height: 1.4;">
+                        ${message.replace(/^[✅❌⚠️📊🔄]\s*/g, '')}
+                    </div>
+                </div>
+            `;
+        }
+        
         document.body.appendChild(toast);
         
-        // Auto-remove after delay
-        const delay = type === 'success' ? 3000 : type === 'error' ? 5000 : 2500;
-        setTimeout(() => {
-            toast.style.animation = 'toastSlideOut 0.3s ease-in forwards';
-            setTimeout(() => toast.remove(), 300);
-        }, delay);
+        // Auto-remove after delay (unless autoDismiss is false)
+        if (autoDismiss) {
+            const delay = isSuccess ? 3500 : isError ? 5000 : 2500;
+            setTimeout(() => {
+                toast.style.animation = 'toastSlideOut 0.3s ease-in forwards';
+                setTimeout(() => toast.remove(), 300);
+            }, delay);
+        }
     }
 
 

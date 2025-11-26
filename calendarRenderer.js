@@ -831,7 +831,7 @@ class CalendarRenderer {
         matrixContainer.style.minWidth = '100%'; // Ensure at least container width
 
         // Render the worker count summary below the calendar (use pre-calculated data)
-        this.renderWorkerCountSummaryWithData(weekDates, workerCountData, todayDateString);
+        this.renderWorkerCountSummaryWithData(weekDates, workerCountData, this.getCachedTodayDateString());
 
         // Note: Drag scroll functionality is bound once during initialization, no need to rebind after every render
 

@@ -243,7 +243,7 @@ class DataManager {
 
     /**
      * Clear a collection (used for bulk updates)
-     * OPTIMIZED: Only fetches document IDs, not full data
+     * Clears both aggregated data and individual docs
      */
     async clearCollection(collectionName) {
         if (!this.workforceManager.firebaseManager) {
@@ -251,28 +251,46 @@ class DataManager {
             return;
         }
 
+        const db = this.workforceManager.firebaseManager.db;
+        const orgId = this.workforceManager.firebaseManager.currentOrgId;
+        const orgRef = db.collection('organizations').doc(orgId);
+
         try {
-            // OPTIMIZATION: Use select() to only get document IDs, not full data
-            // This is much faster for large collections
-            const collectionRef = this.workforceManager.firebaseManager.db
-                .collection('organizations')
-                .doc(this.workforceManager.firebaseManager.currentOrgId)
-                .collection(collectionName);
+            // Clear aggregated data FIRST (fast - single doc delete)
+            const aggregateRef = orgRef.collection('aggregated').doc(collectionName);
+            const aggregateDoc = await aggregateRef.get();
             
-            const snapshot = await collectionRef.get();
-            const count = snapshot.size;
-            
-            if (count === 0) {
-                console.log(`✅ ${collectionName} is already empty`);
-                return;
+            if (aggregateDoc.exists) {
+                const data = aggregateDoc.data();
+                // Delete main aggregate doc
+                await aggregateRef.delete();
+                console.log(`✅ Cleared aggregated ${collectionName}`);
+                
+                // Delete any chunk documents if chunked
+                if (data.chunked && data.chunkCount) {
+                    const chunkDeletes = [];
+                    for (let i = 0; i < data.chunkCount; i++) {
+                        chunkDeletes.push(
+                            orgRef.collection('aggregated').doc(`${collectionName}_chunk_${i}`).delete()
+                        );
+                    }
+                    await Promise.all(chunkDeletes);
+                    console.log(`✅ Cleared ${data.chunkCount} chunk documents`);
+                }
             }
 
-            console.log(`🚀 Deleting ${count} items from ${collectionName}...`);
+            // Also clear individual docs (for legacy data cleanup)
+            const collectionRef = orgRef.collection(collectionName);
+            const snapshot = await collectionRef.get();
             
-            // Create items array with just IDs for deletion
-            const itemsToDelete = snapshot.docs.map(doc => ({ id: doc.id }));
-            await this.workforceManager.firebaseManager.batchDelete(collectionName, itemsToDelete);
-            console.log(`✅ Cleared ${count} items from ${collectionName}`);
+            if (snapshot.size > 0) {
+                console.log(`🧹 Clearing ${snapshot.size} legacy individual docs from ${collectionName}...`);
+                const itemsToDelete = snapshot.docs.map(doc => ({ id: doc.id }));
+                await this.workforceManager.firebaseManager.batchDelete(collectionName, itemsToDelete);
+                console.log(`✅ Cleared legacy docs from ${collectionName}`);
+            }
+            
+            console.log(`✅ ${collectionName} fully cleared`);
         } catch (error) {
             console.error(`❌ Failed to clear ${collectionName}:`, error);
         }
